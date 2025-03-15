@@ -9,13 +9,10 @@ import (
 	"os"
 	"strings"
 	"time"
-
-	"github.com/smallnest/epoller"
 )
 
-func HandleTcpConnection(conn net.Conn, poller epoller.Poller) {
+func HandleTcpConnection(conn net.Conn) {
 	defer func() {
-		poller.Remove(conn) // Remove connection from poller before closing
 		conn.Close()
 		fmt.Printf("Connection closed from %s\n", conn.RemoteAddr())
 	}()
@@ -71,7 +68,6 @@ func echoMode(reader *bufio.Reader, writer *bufio.Writer) {
 }
 
 func uploadFile(reader *bufio.Reader, writer *bufio.Writer) {
-	// Read file name
 	fileName, err := reader.ReadString('\n')
 	if err != nil {
 		writer.WriteString("Upload failed: could not read file name\n")
@@ -89,7 +85,6 @@ func uploadFile(reader *bufio.Reader, writer *bufio.Writer) {
 	}
 	defer file.Close()
 
-	// Copy file data from the connection to the file
 	_, err = io.Copy(file, reader)
 	if err != nil {
 		writer.WriteString(fmt.Sprintf("Upload failed: could not write to file %s\n", fileName))
