@@ -1,0 +1,4 @@
+github.com/smallnest/epoller v1.2.0 h1:KIsR9THbD7n9uL+/adLY6rE6Vwu2JFSmlJrhJx29Mmc=
+github.com/smallnest/epoller v1.2.0/go.mod h1:6D7g5cIgDQbKaK/AIUwCGr7beiqUJ4vo+g37FD/Ijbc=
+golang.org/x/sys v0.0.0-20210525143221-35b2ab0089ea h1:+WiDlPBBaO+h9vPNZi8uJ3k4BkKQB7Iow3aqwHVA5hI=
+golang.org/x/sys v0.0.0-20210525143221-35b2ab0089ea/go.mod h1:oPkhp1MJrh7nUepCBck5+mAzfO9JrbApNNgaTdGDITg=

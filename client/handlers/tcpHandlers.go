@@ -1,11 +1,11 @@
 package handlers
 
 import (
-    "bufio"
-    "fmt"
-    "log"
-    "net"
-    "os"
+	"bufio"
+	"fmt"
+	"log"
+	"net"
+	"os"
 )
 
 func EchoMode(conn net.Conn, reader *bufio.Reader, writer *bufio.Writer) {
@@ -34,11 +34,13 @@ func EchoMode(conn net.Conn, reader *bufio.Reader, writer *bufio.Writer) {
 func UploadFile(conn net.Conn, reader *bufio.Reader, writer *bufio.Writer) {
     fmt.Print("Enter file name: ")
     var fileName string
-    fmt.Scanln(&fileName)
+    scanner := bufio.NewScanner(os.Stdin)
+    scanner.Scan()
+    fileName = scanner.Text()
 
     fmt.Print("Enter file data: ")
-    var data string
-    fmt.Scanln(&data)
+    scanner.Scan()
+    data := scanner.Text()
 
     fmt.Fprintf(conn, "%s\n", fileName)
     fmt.Fprintf(conn, "%s\n", data)
@@ -50,6 +52,7 @@ func UploadFile(conn net.Conn, reader *bufio.Reader, writer *bufio.Writer) {
     writer.WriteString(response)
     writer.Flush()
 }
+
 
 func DownloadFile(conn net.Conn, reader *bufio.Reader, writer *bufio.Writer) {
     fmt.Print("Enter file name: ")
