@@ -7,6 +7,7 @@ import (
 	"log"
 	"net"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -21,7 +22,6 @@ func HandleTcpConnections(conn net.Conn) {
 	writer := bufio.NewWriter(conn)
 
 	for {
-		// Read the incoming command
 		cmdLine, err := reader.ReadString('\n')
 		if err != nil {
 			if err != io.EOF {
@@ -31,44 +31,60 @@ func HandleTcpConnections(conn net.Conn) {
 		}
 		cmdLine = strings.TrimSpace(cmdLine)
 
-		// Parse the command
-		parts := strings.SplitN(cmdLine, " ", 2)
-		cmd := strings.ToUpper(parts[0])
-		var param string
-		if len(parts) > 1 {
-			param = parts[1]
+		parts := strings.Fields(cmdLine)
+		if len(parts) == 0 {
+			continue
 		}
+
+		cmd := strings.ToUpper(parts[0])
 
 		switch cmd {
 		case "TIME":
 			handleTimeCommand(writer)
 		case "ECHO":
+			param := ""
+			if len(parts) > 1 {
+				param = strings.Join(parts[1:], " ")
+			}
 			handleEchoCommand(reader, writer, param)
 		case "UPLOAD":
-			handleUploadCommand(reader, writer, param)
+			if len(parts) < 2 {
+				sendTcpResponse(writer, "Upload failed: missing filename\n")
+				continue
+			}
+			filename := parts[1]
+			var fileSize int64 = -1
+			if len(parts) > 2 {
+				size, err := strconv.ParseInt(parts[2], 10, 64)
+				if err == nil {
+					fileSize = size
+				}
+			}
+			handleUploadCommand(reader, writer, filename, fileSize)
 		case "DOWNLOAD":
-			handleDownloadCommand(reader, writer, param)
+			if len(parts) < 2 {
+				sendTcpResponse(writer, "Download failed: missing filename\n")
+				continue
+			}
+			filename := parts[1]
+			handleDownloadCommand(reader, writer, filename)
 		default:
 			sendTcpResponse(writer, fmt.Sprintf("Invalid command: %s\n", cmd))
 		}
 	}
 }
 
-// handleTimeCommand returns the current server time
 func handleTimeCommand(writer *bufio.Writer) {
 	currentTime := time.Now().Format(time.RFC3339)
 	sendTcpResponse(writer, fmt.Sprintf("Current time: %s\n", currentTime))
 }
 
-// handleEchoCommand processes the echo command
 func handleEchoCommand(reader *bufio.Reader, writer *bufio.Writer, initialMessage string) {
-	// If there's an initial message with the command, echo it back
 	if initialMessage != "" {
 		sendTcpResponse(writer, fmt.Sprintf("%s\n", initialMessage))
 		return
 	}
 
-	// Otherwise enter interactive echo mode
 	sendTcpResponse(writer, "Echo mode activated. Type 'exit' to quit.\n")
 
 	for {
@@ -85,21 +101,7 @@ func handleEchoCommand(reader *bufio.Reader, writer *bufio.Writer, initialMessag
 	}
 }
 
-// handleUploadCommand processes a file upload request
-func handleUploadCommand(reader *bufio.Reader, writer *bufio.Writer, filename string) {
-	// Handle filename from command or next line
-	if filename == "" {
-		// Read filename from the next line
-		var err error
-		filename, err = reader.ReadString('\n')
-		if err != nil {
-			sendTcpResponse(writer, "Upload failed: could not read filename\n")
-			return
-		}
-		filename = strings.TrimSpace(filename)
-	}
-
-	// Create or truncate the file
+func handleUploadCommand(reader *bufio.Reader, writer *bufio.Writer, filename string, fileSize int64) {
 	file, err := os.Create(filename)
 	if err != nil {
 		sendTcpResponse(writer, fmt.Sprintf("Upload failed: could not create file %s: %v\n", filename, err))
@@ -107,12 +109,13 @@ func handleUploadCommand(reader *bufio.Reader, writer *bufio.Writer, filename st
 	}
 	defer file.Close()
 
-	// Read the file data
-	sendTcpResponse(writer, "Ready to receive file data. End with a newline.\n")
+	sendTcpResponse(writer, "Ready to receive file. End with EOF\\n\n")
 
-	// Buffer to read file content
+	bytesReceived := int64(0)
 	buffer := make([]byte, 4096)
-	for {
+	eofMarkerFound := false
+
+	for !eofMarkerFound {
 		n, err := reader.Read(buffer)
 		if err != nil {
 			if err == io.EOF {
@@ -122,37 +125,36 @@ func handleUploadCommand(reader *bufio.Reader, writer *bufio.Writer, filename st
 			return
 		}
 
-		// Check for end marker (newline)
-		if n == 1 && buffer[0] == '\n' {
-			break
+		data := buffer[:n]
+		if n >= 4 {
+			endStr := string(data[n-4 : n])
+			if endStr == "EOF\n" {
+				_, err = file.Write(data[:n-4])
+				eofMarkerFound = true
+				bytesReceived += int64(n - 4)
+			} else {
+				_, err = file.Write(data)
+				bytesReceived += int64(n)
+			}
+		} else {
+			_, err = file.Write(data)
+			bytesReceived += int64(n)
 		}
 
-		// Write to file
-		_, err = file.Write(buffer[:n])
 		if err != nil {
 			sendTcpResponse(writer, fmt.Sprintf("Upload failed: error writing to file: %v\n", err))
 			return
 		}
+
+		if fileSize > 0 && bytesReceived >= fileSize && eofMarkerFound {
+			break
+		}
 	}
 
-	sendTcpResponse(writer, fmt.Sprintf("File '%s' uploaded successfully\n", filename))
+	sendTcpResponse(writer, fmt.Sprintf("File '%s' uploaded successfully. Received %d bytes.\n", filename, bytesReceived))
 }
 
-// handleDownloadCommand processes a file download request
 func handleDownloadCommand(reader *bufio.Reader, writer *bufio.Writer, filename string) {
-	// Handle filename from command or next line
-	if filename == "" {
-		// Read filename from the next line
-		var err error
-		filename, err = reader.ReadString('\n')
-		if err != nil {
-			sendTcpResponse(writer, "Download failed: could not read filename\n")
-			return
-		}
-		filename = strings.TrimSpace(filename)
-	}
-
-	// Open the file
 	file, err := os.Open(filename)
 	if err != nil {
 		sendTcpResponse(writer, fmt.Sprintf("Download failed: could not open file %s: %v\n", filename, err))
@@ -160,10 +162,14 @@ func handleDownloadCommand(reader *bufio.Reader, writer *bufio.Writer, filename 
 	}
 	defer file.Close()
 
-	// Send file content
-	sendTcpResponse(writer, fmt.Sprintf("Sending file: %s\n", filename))
+	fileInfo, err := file.Stat()
+	if err != nil {
+		sendTcpResponse(writer, fmt.Sprintf("Download failed: could not get file info: %v\n", err))
+		return
+	}
 
-	// Buffer for reading from file
+	sendTcpResponse(writer, fmt.Sprintf("Sending file: %s (%d bytes)\n", filename, fileInfo.Size()))
+
 	buffer := make([]byte, 4096)
 	for {
 		n, err := file.Read(buffer)
@@ -171,11 +177,10 @@ func handleDownloadCommand(reader *bufio.Reader, writer *bufio.Writer, filename 
 			if err == io.EOF {
 				break
 			}
-			sendTcpResponse(writer, fmt.Sprintf("Download failed: error reading file: %v\n", err))
+			log.Printf("Download failed: error reading file: %v\n", err)
 			return
 		}
 
-		// Write to connection
 		_, err = writer.Write(buffer[:n])
 		if err != nil {
 			log.Printf("Download failed: error writing to connection: %v\n", err)
@@ -184,12 +189,10 @@ func handleDownloadCommand(reader *bufio.Reader, writer *bufio.Writer, filename 
 		writer.Flush()
 	}
 
-	// Signal end of file with a newline
-	writer.WriteByte('\n')
+	writer.WriteString("EOF\n")
 	writer.Flush()
 }
 
-// sendResponse is a helper function to send a response and flush the writer
 func sendTcpResponse(writer *bufio.Writer, message string) {
 	writer.WriteString(message)
 	writer.Flush()

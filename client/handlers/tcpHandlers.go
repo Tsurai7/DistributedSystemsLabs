@@ -87,60 +87,80 @@ func sendTCPCommand(conn net.Conn, command string) {
 		return
 	}
 
-	// Read response from server
-	response := make([]byte, 1024)
-	n, err := conn.Read(response)
+	reader := bufio.NewReader(conn)
+	response, err := reader.ReadString('\n')
 	if err != nil {
 		fmt.Println("Error reading response:", err)
 		return
 	}
 
-	fmt.Printf("Response: %s\n", response[:n])
+	fmt.Printf("Response: %s", response)
 }
 
 func uploadFileTCP(conn net.Conn, filename string) {
-	// Read file content
-	fileData, err := os.ReadFile(filename)
+	fileInfo, err := os.Stat(filename)
 	if err != nil {
-		fmt.Println("Error reading file:", err)
+		fmt.Println("Error accessing file:", err)
 		return
 	}
 
-	// Send upload command with filename
-	command := fmt.Sprintf("UPLOAD %s\n", filename)
+	file, err := os.Open(filename)
+	if err != nil {
+		fmt.Println("Error opening file:", err)
+		return
+	}
+	defer file.Close()
+
+	command := fmt.Sprintf("UPLOAD %s %d\n", filename, fileInfo.Size())
 	_, err = conn.Write([]byte(command))
 	if err != nil {
 		fmt.Println("Error sending upload command:", err)
 		return
 	}
 
-	// Send file content
-	_, err = conn.Write(fileData)
+	reader := bufio.NewReader(conn)
+
+	response, err := reader.ReadString('\n')
 	if err != nil {
-		fmt.Println("Error sending file:", err)
+		fmt.Println("Error reading server response:", err)
+		return
+	}
+	fmt.Print(response)
+
+	buffer := make([]byte, 4096)
+	for {
+		n, err := file.Read(buffer)
+		if err != nil {
+			if err == io.EOF {
+				break
+			}
+			fmt.Println("Error reading file:", err)
+			return
+		}
+
+		_, err = conn.Write(buffer[:n])
+		if err != nil {
+			fmt.Println("Error sending file data:", err)
+			return
+		}
+	}
+
+	_, err = conn.Write([]byte("EOF\n"))
+	if err != nil {
+		fmt.Println("Error signaling end of file:", err)
 		return
 	}
 
-	// Signal end of file with a newline
-	_, err = conn.Write([]byte("\n"))
+	response, err = reader.ReadString('\n')
 	if err != nil {
-		fmt.Println("Error sending end of file marker:", err)
+		fmt.Println("Error reading completion response:", err)
 		return
 	}
 
-	// Read response
-	response := make([]byte, 1024)
-	n, err := conn.Read(response)
-	if err != nil {
-		fmt.Println("Error reading response:", err)
-		return
-	}
-
-	fmt.Printf("Response: %s\n", response[:n])
+	fmt.Print(response)
 }
 
 func downloadFileTCP(conn net.Conn, filename string) {
-	// Send download command
 	command := fmt.Sprintf("DOWNLOAD %s\n", filename)
 	_, err := conn.Write([]byte(command))
 	if err != nil {
@@ -148,7 +168,21 @@ func downloadFileTCP(conn net.Conn, filename string) {
 		return
 	}
 
-	// Create file to save the downloaded content
+	reader := bufio.NewReader(conn)
+
+	response, err := reader.ReadString('\n')
+	if err != nil {
+		fmt.Println("Error reading server response:", err)
+		return
+	}
+
+	if strings.HasPrefix(response, "Download failed") {
+		fmt.Print(response)
+		return
+	}
+
+	fmt.Print(response)
+
 	outFile, err := os.Create(filename)
 	if err != nil {
 		fmt.Println("Error creating file:", err)
@@ -156,25 +190,27 @@ func downloadFileTCP(conn net.Conn, filename string) {
 	}
 	defer outFile.Close()
 
-	// Read file content from server
-	buffer := make([]byte, 4096)
-	for {
-		n, err := conn.Read(buffer)
+	fileContent := make([]byte, 4096)
+	eof := false
+
+	for !eof {
+		n, err := reader.Read(fileContent)
 		if err != nil {
 			if err == io.EOF {
 				break
 			}
-			fmt.Println("Error reading file content:", err)
+			fmt.Println("Error reading from connection:", err)
 			return
 		}
 
-		// Check for end of file marker
-		if n == 1 && buffer[0] == '\n' {
-			break
+		data := fileContent[:n]
+		if n >= 4 && string(data[n-4:n]) == "EOF\n" {
+			_, err = outFile.Write(data[:n-4])
+			eof = true
+		} else {
+			_, err = outFile.Write(data)
 		}
 
-		// Write data to file
-		_, err = outFile.Write(buffer[:n])
 		if err != nil {
 			fmt.Println("Error writing to file:", err)
 			return
