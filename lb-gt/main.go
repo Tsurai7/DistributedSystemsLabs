@@ -104,8 +104,7 @@ func handleNewClient(conn net.Conn, clientIP string) {
 		return
 	}
 
-	// Запускаем дочерний процесс сервера с флагом SkipTestConn,
-	// чтобы он не завершался после проверочного соединения
+	// Запускаем дочерний процесс сервера
 	cmd := exec.Command(execPath, "child", strconv.Itoa(childPort))
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -158,7 +157,6 @@ func handleNewClient(conn net.Conn, clientIP string) {
 		return
 	}
 
-	// Отправляем клиенту информацию о перенаправлении
 	log.Printf("Redirecting client %s to child server on port %d\n", clientIP, childPort)
 	_, err = fmt.Fprintf(conn, "REDIRECT %d\n", childPort)
 	if err != nil {
@@ -174,16 +172,16 @@ func handleNewClient(conn net.Conn, clientIP string) {
 		return
 	}
 
-	// Даем клиенту достаточно времени на переподключение
+	// Даем клиенту время на переподключение
 	time.Sleep(1 * time.Second)
 
-	// Теперь закрываем проверочное соединение
+	// Теперь можно закрыть тестовое соединение
 	if testConn != nil {
 		log.Printf("Closing test connection to child server on port %d", childPort)
 		testConn.Close()
 	}
 
-	// Закрываем исходное соединение после того, как клиент переподключился
+	// Закрываем соединение с клиентом
 	conn.Close()
 
 	// Ждем завершения дочернего процесса
@@ -209,9 +207,6 @@ func handleChildServer(port int) {
 
 	log.Printf("Child server listening on port %d\n", port)
 
-	// Ограничение - 2 соединения:
-	// 1. Проверочное соединение от основного сервера
-	// 2. Реальное соединение от клиента
 	connCount := 0
 	maxConn := 2
 
@@ -226,22 +221,19 @@ func handleChildServer(port int) {
 		log.Printf("Child server on port %d accepted connection %d/%d from %s\n",
 			port, connCount, maxConn, conn.RemoteAddr())
 
-		// Если это проверочное соединение, просто держим его открытым
 		if connCount == 1 {
-			// Обрабатываем проверочное соединение в отдельной горутине
+			// Это тестовое соединение, держим его открытым
 			go func(c net.Conn) {
 				defer c.Close()
-				// Ждем закрытия соединения
 				buffer := make([]byte, 1)
 				c.Read(buffer) // Блокируется до закрытия соединения
 				log.Printf("Test connection closed on port %d", port)
 			}(conn)
 		} else {
-			// Это реальное клиентское соединение
+			// Это клиентское соединение, обрабатываем его
 			handleClientConnection(conn)
-			// После отключения клиента завершаем работу
 			log.Printf("Client disconnected from child server on port %d\n", port)
-			return // Завершаем процесс после обработки клиентского соединения
+			return // Завершаем работу сервера после обработки клиента
 		}
 	}
 }
@@ -249,13 +241,12 @@ func handleChildServer(port int) {
 func handleClientConnection(conn net.Conn) {
 	defer conn.Close()
 
-	// Сообщаем клиенту, что соединение установлено
+	// Отправляем приветственное сообщение
 	fmt.Fprintf(conn, "Hello from child server! You are connected.\n")
 
-	// Улучшенная обработка клиентских сообщений с использованием bufio.Reader
 	reader := bufio.NewReader(conn)
 	for {
-		// Чтение строки до символа новой строки
+		// Читаем команду от клиента
 		message, err := reader.ReadString('\n')
 		if err != nil {
 			if err != io.EOF {
@@ -264,19 +255,143 @@ func handleClientConnection(conn net.Conn) {
 			break
 		}
 
-		// Обрабатываем полученное сообщение
 		message = strings.TrimSpace(message)
-		log.Printf("Received message: %s\n", message)
+		log.Printf("Received command: %s\n", message)
 
-		// Простая обработка команд
-		if strings.HasPrefix(message, "ECHO ") {
-			response := strings.TrimPrefix(message, "ECHO ")
+		// Парсим команду
+		cmdParts := strings.Fields(message)
+		if len(cmdParts) == 0 {
+			continue
+		}
+
+		cmd := strings.ToUpper(cmdParts[0])
+
+		switch {
+		case cmd == "ECHO" && len(cmdParts) > 1:
+			// Отправляем эхо-ответ
+			response := strings.Join(cmdParts[1:], " ")
 			fmt.Fprintf(conn, "%s\n", response)
-		} else if message == "TIME" {
+
+		case cmd == "TIME":
+			// Отправляем текущее время
 			fmt.Fprintf(conn, "%s\n", time.Now().Format(time.RFC3339))
-		} else {
-			// Эхо-ответ для неизвестных команд
+
+		case cmd == "UPLOAD" && len(cmdParts) >= 3:
+			// Обрабатываем загрузку файла
+			filename := cmdParts[1]
+			fileSize, err := strconv.ParseInt(cmdParts[2], 10, 64)
+			if err != nil {
+				fmt.Fprintf(conn, "Upload failed: invalid file size\n")
+				continue
+			}
+			handleFileUpload(conn, reader, filename, fileSize)
+
+		case cmd == "DOWNLOAD" && len(cmdParts) >= 2:
+			// Обрабатываем скачивание файла
+			filename := cmdParts[1]
+			handleFileDownload(conn, filename)
+
+		default:
+			// Неизвестная команда
 			fmt.Fprintf(conn, "Echo: %s\n", message)
 		}
+	}
+}
+
+// Обработка загрузки файла от клиента
+func handleFileUpload(conn net.Conn, reader *bufio.Reader, filename string, fileSize int64) {
+	// Отправляем подтверждение готовности принять файл
+	fmt.Fprintf(conn, "Ready to receive file '%s' (%d bytes)\n", filename, fileSize)
+
+	// Создаем файл для записи данных
+	outFile, err := os.Create(filename)
+	if err != nil {
+		fmt.Fprintf(conn, "Upload failed: %v\n", err)
+		return
+	}
+	defer outFile.Close()
+
+	// Читаем данные файла
+	bytesReceived := int64(0)
+	buffer := make([]byte, 4096)
+	done := false
+
+	for !done && bytesReceived < fileSize {
+		n, err := reader.Read(buffer)
+		if err != nil {
+			if err == io.EOF {
+				break
+			}
+			fmt.Fprintf(conn, "Upload failed: %v\n", err)
+			return
+		}
+
+		data := buffer[:n]
+
+		// Проверяем на маркер конца файла
+		if n >= 4 && string(data[n-4:n]) == "EOF\n" {
+			// Записываем данные без EOF
+			_, err = outFile.Write(data[:n-4])
+			bytesReceived += int64(n - 4)
+			done = true
+		} else {
+			_, err = outFile.Write(data)
+			bytesReceived += int64(n)
+		}
+
+		if err != nil {
+			fmt.Fprintf(conn, "Upload failed: %v\n", err)
+			return
+		}
+	}
+
+	// Отправляем подтверждение успешной загрузки
+	fmt.Fprintf(conn, "File '%s' uploaded successfully (%d bytes)\n", filename, bytesReceived)
+}
+
+// Обработка скачивания файла клиентом
+func handleFileDownload(conn net.Conn, filename string) {
+	// Проверяем существование файла
+	fileInfo, err := os.Stat(filename)
+	if err != nil {
+		fmt.Fprintf(conn, "Download failed: %v\n", err)
+		return
+	}
+
+	// Открываем файл для чтения
+	file, err := os.Open(filename)
+	if err != nil {
+		fmt.Fprintf(conn, "Download failed: %v\n", err)
+		return
+	}
+	defer file.Close()
+
+	// Отправляем информацию о файле
+	fmt.Fprintf(conn, "Sending file '%s' (%d bytes)\n", filename, fileInfo.Size())
+
+	// Отправляем содержимое файла
+	buffer := make([]byte, 4096)
+	for {
+		n, err := file.Read(buffer)
+		if err != nil {
+			if err == io.EOF {
+				break
+			}
+			log.Printf("Error reading file: %v", err)
+			return
+		}
+
+		_, err = conn.Write(buffer[:n])
+		if err != nil {
+			log.Printf("Error sending file data: %v", err)
+			return
+		}
+	}
+
+	// Отправляем маркер конца файла
+	_, err = conn.Write([]byte("EOF\n"))
+	if err != nil {
+		log.Printf("Error signaling end of file: %v", err)
+		return
 	}
 }
