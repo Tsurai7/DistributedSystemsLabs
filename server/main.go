@@ -3,28 +3,41 @@ package main
 import (
 	"fmt"
 	"log"
-	"time"
 	"net"
-
 	"server/handlers"
+	"time"
 )
 
 const (
-	TcpHostPort = ":8081"
-	UdpHostPort = ":9091"
+	TcpHostPort     = ":8081"
+	UdpHostPort     = ":9091"
 	KeepAlivePeriod = 30
 )
 
 func main() {
-	startTcpServer()
-	startUdpServer()
-	select {}
+	errChan := make(chan error, 2)
+
+	go func() {
+		err := startUdpServer()
+		errChan <- err
+	}()
+
+	go func() {
+		err := startTcpServer()
+		errChan <- err
+	}()
+
+	for err := range errChan {
+		if err != nil {
+			log.Fatalf("Server error: %v", err)
+		}
+	}
 }
 
-func startTcpServer() {
+func startTcpServer() error {
 	ln, err := net.Listen("tcp", TcpHostPort)
 	if err != nil {
-		log.Fatalf("Failed to listen: %v", err)
+		return fmt.Errorf("Failed to listen: %v", err)
 	}
 	defer ln.Close()
 
@@ -36,7 +49,7 @@ func startTcpServer() {
 			log.Printf("Accept error: %v", err)
 			continue
 		}
-		
+
 		tcpConn := conn.(*net.TCPConn)
 		if err := tcpConn.SetKeepAlive(true); err != nil {
 			log.Printf("Failed to enable Keep-Alive: %v", err)
@@ -50,23 +63,25 @@ func startTcpServer() {
 
 		fmt.Printf("New TCP connection from %s\n", conn.RemoteAddr())
 
-		go handlers.HandleTcpConnection(conn)
+		go handlers.HandleTcpConnections(conn)
 	}
 }
 
-func startUdpServer() {
+func startUdpServer() error {
 	addr, err := net.ResolveUDPAddr("udp", UdpHostPort)
 	if err != nil {
-		log.Fatalf("Failed to resolve UDP address: %v", err)
+		return fmt.Errorf("Failed to resolve UDP address: %v", err)
 	}
 
 	conn, err := net.ListenUDP("udp", addr)
 	if err != nil {
-		log.Fatalf("Failed to start UDP server: %v", err)
+		return fmt.Errorf("Failed to start UDP server: %v", err)
 	}
 	defer conn.Close()
 
 	fmt.Printf("UDP server listening on %s\n", UdpHostPort)
-	
-	go handlers.HandleUdpConnections(conn)
+
+	handlers.HandleUdpConnections(conn)
+
+	return nil
 }
