@@ -11,11 +11,13 @@ import (
 )
 
 const (
-	UdpDatagramSize = 1024
+	UdpDatagramSize = 1400             // Recommended datagram size per ethernet mtu limitations
+	SlidingWindow   = 3                // We will receive ACK for 3 packages
+	BuffSize        = 64 * 1024 * 1024 // 64 MBs
 )
 
 func HandleUdpConnections(conn *net.UDPConn) {
-	buffer := make([]byte, UdpDatagramSize) // 1MB buffer for file transfers
+	buffer := make([]byte, UdpDatagramSize)
 
 	for {
 		n, addr, err := conn.ReadFromUDP(buffer)
@@ -24,12 +26,10 @@ func HandleUdpConnections(conn *net.UDPConn) {
 			continue
 		}
 
-		// Process the command in a goroutine to handle multiple clients
 		processCommand(conn, addr, buffer[:n])
 	}
 }
 
-// processCommand parses and routes the command to appropriate handler
 func processCommand(conn *net.UDPConn, addr *net.UDPAddr, data []byte) {
 	cmd := strings.TrimSpace(string(data))
 	parts := strings.SplitN(cmd, " ", 2)
@@ -77,7 +77,7 @@ func handleUpload(conn *net.UDPConn, addr *net.UDPAddr, filename string) {
 	fmt.Printf("Receiving upload for file '%s' from %s\n", filename, addr.String())
 	sendResponse(conn, addr, fmt.Sprintf("READY: Waiting for '%s' data", filename))
 
-	conn.SetReadBuffer(64 * 1024 * 1024) // 64 kbytes buff size
+	conn.SetReadBuffer(BuffSize)
 
 	outputFile, err := os.Create(filename)
 	if err != nil {
@@ -86,11 +86,10 @@ func handleUpload(conn *net.UDPConn, addr *net.UDPAddr, filename string) {
 	}
 	defer outputFile.Close()
 
-	bufWriter := bufio.NewWriterSize(outputFile, 64*1024*1024)
+	bufWriter := bufio.NewWriterSize(outputFile, BuffSize)
 	defer bufWriter.Flush()
 
-	chunkSize := 1500
-	buffer := make([]byte, chunkSize)
+	buffer := make([]byte, UdpDatagramSize)
 	totalBytes := 0
 	start := time.Now()
 	noDataCount := 0
@@ -128,11 +127,11 @@ func handleUpload(conn *net.UDPConn, addr *net.UDPAddr, filename string) {
 		}
 
 		if n > 0 && strings.HasPrefix(string(buffer[:n]), "RESEND:") {
-			handleResendRequest(conn, addr, string(buffer[:n]), receivedChunks, chunkSize)
+			handleResendRequest(conn, addr, string(buffer[:n]), receivedChunks, UdpDatagramSize)
 			continue
 		}
 
-		chunkIndex := totalBytes / chunkSize
+		chunkIndex := totalBytes / UdpDatagramSize
 		if !receivedChunks[chunkIndex] {
 			if _, err := bufWriter.Write(buffer[:n]); err != nil {
 				fmt.Println("Error writing to file:", err)
@@ -143,7 +142,7 @@ func handleUpload(conn *net.UDPConn, addr *net.UDPAddr, filename string) {
 			totalBytes += n
 			ackCounter++
 
-			if ackCounter >= 3 {
+			if ackCounter >= SlidingWindow {
 				ack := fmt.Sprintf("ACK:%d", chunkIndex)
 				conn.WriteToUDP([]byte(ack), addr)
 				ackCounter = 0
@@ -271,4 +270,13 @@ func handleDownload(conn *net.UDPConn, addr *net.UDPAddr, filename string) {
 	speed := float64(fileSize) / (1024 * 1024 * elapsed) // MB/s
 	fmt.Printf("\nFile '%s' sent successfully in %.2f seconds (%.2f MB/s)\n",
 		filename, elapsed, speed)
+}
+
+func allAcked(ackedChunks []bool) bool {
+	for _, acked := range ackedChunks {
+		if !acked {
+			return false
+		}
+	}
+	return true
 }

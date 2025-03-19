@@ -11,7 +11,10 @@ import (
 )
 
 const (
-	UdpDatagramSize = 1500
+	UdpDatagramSize = 1400             // Recommended datagram size per ethernet mtu limitations
+	SlidingWindow   = 3                // We will receive ACK for 3 packages
+	BuffSize        = 64 * 1024 * 1024 // 64 MBs
+
 )
 
 func HandleUDPCommands(conn *net.UDPConn, scanner *bufio.Scanner) {
@@ -92,8 +95,7 @@ func sendUDPCommand(conn *net.UDPConn, command string) {
 		return
 	}
 
-	// Read response from server
-	response := make([]byte, 1024)
+	response := make([]byte, UdpDatagramSize)
 	n, _, err := conn.ReadFromUDP(response)
 	if err != nil {
 		fmt.Println("Error reading response:", err)
@@ -115,7 +117,7 @@ func uploadFileUDP(conn *net.UDPConn, filename string) {
 	fileSize := len(fileData)
 	fmt.Printf("Starting upload of '%s' (%d bytes)\n", filename, fileSize)
 
-	conn.SetWriteBuffer(64 * 1024 * 1024) // 64 kbytes byff size
+	conn.SetWriteBuffer(BuffSize)
 
 	uploadCmd := fmt.Sprintf("UPLOAD %s", filename)
 	_, err = conn.Write([]byte(uploadCmd))
@@ -124,7 +126,7 @@ func uploadFileUDP(conn *net.UDPConn, filename string) {
 		return
 	}
 
-	respBuffer := make([]byte, 64*1024*1024)
+	respBuffer := make([]byte, BuffSize)
 	conn.SetReadDeadline(time.Now().Add(1 * time.Millisecond))
 	n, _, err := conn.ReadFromUDP(respBuffer)
 	if err != nil {
@@ -142,10 +144,8 @@ func uploadFileUDP(conn *net.UDPConn, filename string) {
 
 	conn.SetReadDeadline(time.Time{})
 
-	chunkSize := 1500
-	numChunks := (fileSize + chunkSize - 1) / chunkSize
+	numChunks := (fileSize + UdpDatagramSize - 1) / UdpDatagramSize
 
-	windowSize := 3 // Размер окна (отправляем 3 пакета перед ожиданием ACK)
 	sentChunks := make([]bool, numChunks)
 	ackedChunks := make([]bool, numChunks)
 	nextChunk := 0
@@ -153,14 +153,14 @@ func uploadFileUDP(conn *net.UDPConn, filename string) {
 	fmt.Print("\033[H\033[2J") // Очистка экрана
 	fmt.Println("Uploading file:", filename)
 	fmt.Println("Total chunks:", numChunks)
-	fmt.Println("Window size:", windowSize)
+	fmt.Println("Window size:", SlidingWindow)
 	fmt.Println("----------------------------------------")
 
 	for nextChunk < numChunks || !allAcked(ackedChunks) {
-		for i := nextChunk; i < nextChunk+windowSize && i < numChunks; i++ {
+		for i := nextChunk; i < nextChunk+SlidingWindow && i < numChunks; i++ {
 			if !sentChunks[i] {
-				startPos := i * chunkSize
-				endPos := startPos + chunkSize
+				startPos := i * UdpDatagramSize
+				endPos := startPos + UdpDatagramSize
 				if endPos > fileSize {
 					endPos = fileSize
 				}
@@ -179,7 +179,7 @@ func uploadFileUDP(conn *net.UDPConn, filename string) {
 		n, _, err := conn.ReadFromUDP(respBuffer)
 		if err != nil {
 			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
-				for i := nextChunk; i < nextChunk+windowSize && i < numChunks; i++ {
+				for i := nextChunk; i < nextChunk+SlidingWindow && i < numChunks; i++ {
 					if !ackedChunks[i] {
 						sentChunks[i] = false
 					}
@@ -216,7 +216,7 @@ func uploadFileUDP(conn *net.UDPConn, filename string) {
 
 	retries := 3
 	for i := 0; i < retries; i++ {
-		conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+		conn.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
 		n, _, err := conn.ReadFromUDP(respBuffer)
 		if err != nil {
 			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
