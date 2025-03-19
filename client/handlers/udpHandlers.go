@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -102,10 +103,18 @@ func sendUDPCommand(conn *net.UDPConn, command string) {
 	fmt.Printf("Response: %s\n", response[:n])
 }
 
+func updateLine(line int, format string, args ...interface{}) {
+	// Перемещаем курсор на нужную строку
+	fmt.Printf("\033[%d;0H", line)
+	// Очищаем строку
+	fmt.Print("\033[2K")
+	// Выводим новое содержимое
+	fmt.Printf(format, args...)
+}
+
 func uploadFileUDP(conn *net.UDPConn, filename string) {
 	start := time.Now()
 
-	// Чтение файла для загрузки
 	fileData, err := os.ReadFile(filename)
 	if err != nil {
 		fmt.Println("Error reading file:", err)
@@ -115,10 +124,8 @@ func uploadFileUDP(conn *net.UDPConn, filename string) {
 	fileSize := len(fileData)
 	fmt.Printf("Starting upload of '%s' (%d bytes)\n", filename, fileSize)
 
-	// Увеличение буфера отправки UDP
 	conn.SetWriteBuffer(8 * 1024 * 1024) // 8 МБ буфер
 
-	// Отправка команды UPLOAD с именем файла
 	uploadCmd := fmt.Sprintf("UPLOAD %s", filename)
 	_, err = conn.Write([]byte(uploadCmd))
 	if err != nil {
@@ -126,7 +133,6 @@ func uploadFileUDP(conn *net.UDPConn, filename string) {
 		return
 	}
 
-	// Ожидание ответа READY от сервера
 	respBuffer := make([]byte, 1024)
 	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 	n, _, err := conn.ReadFromUDP(respBuffer)
@@ -143,44 +149,80 @@ func uploadFileUDP(conn *net.UDPConn, filename string) {
 
 	fmt.Println("Server response:", initialResponse)
 
-	// Сброс таймаута чтения
 	conn.SetReadDeadline(time.Time{})
 
-	// Размер чанка (меньше MTU для UDP)
 	chunkSize := 1280
-
-	// Количество чанков
 	numChunks := (fileSize + chunkSize - 1) / chunkSize
 
-	// Отправка файла по частям
-	sentBytes := 0
-	lastUpdate := time.Now()
+	// Скользящее окно
+	windowSize := 5
+	sentChunks := make([]bool, numChunks)
+	ackedChunks := make([]bool, numChunks)
+	nextChunk := 0
 
-	for i := 0; i < numChunks; i++ {
-		// Границы чанка
-		startPos := i * chunkSize
-		endPos := startPos + chunkSize
-		if endPos > fileSize {
-			endPos = fileSize
+	// Очистка экрана и вывод заголовков
+	fmt.Print("\033[H\033[2J") // Очистка экрана
+	fmt.Println("Uploading file:", filename)
+	fmt.Println("Total chunks:", numChunks)
+	fmt.Println("Window size:", windowSize)
+	fmt.Println("----------------------------------------")
+
+	for nextChunk < numChunks || !allAcked(ackedChunks) {
+		// Отправка пакетов в пределах окна
+		for i := nextChunk; i < nextChunk+windowSize && i < numChunks; i++ {
+			if !sentChunks[i] {
+				startPos := i * chunkSize
+				endPos := startPos + chunkSize
+				if endPos > fileSize {
+					endPos = fileSize
+				}
+
+				_, err = conn.Write(fileData[startPos:endPos])
+				if err != nil {
+					fmt.Println("Error sending file chunk:", err)
+					return
+				}
+
+				sentChunks[i] = true
+				updateLine(5, "Sent chunks: %d/%d", i+1, numChunks)
+			}
 		}
 
-		// Отправка чанка
-		_, err = conn.Write(fileData[startPos:endPos])
+		// Ожидание подтверждений
+		conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+		n, _, err := conn.ReadFromUDP(respBuffer)
 		if err != nil {
-			fmt.Println("Error sending file chunk:", err)
-			return
+			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+				// Таймаут, повторная отправка неподтвержденных пакетов
+				updateLine(6, "Timeout, resending unacked chunks")
+				for i := nextChunk; i < nextChunk+windowSize && i < numChunks; i++ {
+					if !ackedChunks[i] {
+						sentChunks[i] = false
+					}
+				}
+				continue
+			} else {
+				fmt.Println("Error receiving ACK:", err)
+				return
+			}
 		}
 
-		sentBytes += endPos - startPos
+		ack := string(respBuffer[:n])
+		if strings.HasPrefix(ack, "ACK:") {
+			chunkIndex, err := strconv.Atoi(strings.TrimPrefix(ack, "ACK:"))
+			if err != nil {
+				fmt.Println("Invalid ACK received:", ack)
+				return
+			}
 
-		// Логирование прогресса
-		if time.Since(lastUpdate) > 100*time.Millisecond || i == numChunks-1 {
-			elapsed := time.Since(start).Seconds()
-			speed := float64(sentBytes) / (1024 * 1024 * elapsed) // MB/s
-			fmt.Printf("\rProgress: %.1f%% (%d/%d bytes) - %.2f MB/s",
-				float64(sentBytes)*100/float64(fileSize),
-				sentBytes, fileSize, speed)
-			lastUpdate = time.Now()
+			ackedChunks[chunkIndex] = true
+			updateLine(7, "Acked chunks: %d/%d", chunkIndex+1, numChunks)
+
+			if chunkIndex == nextChunk {
+				for nextChunk < numChunks && ackedChunks[nextChunk] {
+					nextChunk++
+				}
+			}
 		}
 	}
 
@@ -193,11 +235,6 @@ func uploadFileUDP(conn *net.UDPConn, filename string) {
 	// Ожидание финального ответа от сервера
 	retries := 3
 	for i := 0; i < retries; i++ {
-		// Очистка буфера перед чтением
-		for i := range respBuffer {
-			respBuffer[i] = 0
-		}
-
 		conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 		n, _, err := conn.ReadFromUDP(respBuffer)
 		if err != nil {
@@ -216,11 +253,19 @@ func uploadFileUDP(conn *net.UDPConn, filename string) {
 
 	conn.SetReadDeadline(time.Time{})
 
-	// Вывод статистики
 	elapsed := time.Since(start).Seconds()
-	speed := float64(fileSize) / (1024 * 1024 * elapsed) // MB/s
+	speed := float64(fileSize) / (1024 * 1024 * elapsed)
 	fmt.Printf("File '%s' uploaded in %.2f seconds (%.2f MB/s)\n",
 		filename, elapsed, speed)
+}
+
+func allAcked(ackedChunks []bool) bool {
+	for _, acked := range ackedChunks {
+		if !acked {
+			return false
+		}
+	}
+	return true
 }
 
 func downloadFileUDP(conn *net.UDPConn, filename string) {
