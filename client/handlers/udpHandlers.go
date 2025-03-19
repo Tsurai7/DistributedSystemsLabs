@@ -11,7 +11,7 @@ import (
 )
 
 const (
-	UdpDatagramSize = 1024
+	UdpDatagramSize = 1500
 )
 
 func HandleUDPCommands(conn *net.UDPConn, scanner *bufio.Scanner) {
@@ -103,15 +103,6 @@ func sendUDPCommand(conn *net.UDPConn, command string) {
 	fmt.Printf("Response: %s\n", response[:n])
 }
 
-func updateLine(line int, format string, args ...interface{}) {
-	// Перемещаем курсор на нужную строку
-	fmt.Printf("\033[%d;0H", line)
-	// Очищаем строку
-	fmt.Print("\033[2K")
-	// Выводим новое содержимое
-	fmt.Printf(format, args...)
-}
-
 func uploadFileUDP(conn *net.UDPConn, filename string) {
 	start := time.Now()
 
@@ -124,7 +115,7 @@ func uploadFileUDP(conn *net.UDPConn, filename string) {
 	fileSize := len(fileData)
 	fmt.Printf("Starting upload of '%s' (%d bytes)\n", filename, fileSize)
 
-	conn.SetWriteBuffer(8 * 1024 * 1024) // 8 МБ буфер
+	conn.SetWriteBuffer(64 * 1024 * 1024) // 64 kbytes byff size
 
 	uploadCmd := fmt.Sprintf("UPLOAD %s", filename)
 	_, err = conn.Write([]byte(uploadCmd))
@@ -133,8 +124,8 @@ func uploadFileUDP(conn *net.UDPConn, filename string) {
 		return
 	}
 
-	respBuffer := make([]byte, 1024)
-	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	respBuffer := make([]byte, 64*1024*1024)
+	conn.SetReadDeadline(time.Now().Add(1 * time.Millisecond))
 	n, _, err := conn.ReadFromUDP(respBuffer)
 	if err != nil {
 		fmt.Println("Error receiving initial response:", err)
@@ -151,16 +142,14 @@ func uploadFileUDP(conn *net.UDPConn, filename string) {
 
 	conn.SetReadDeadline(time.Time{})
 
-	chunkSize := 1280
+	chunkSize := 1500
 	numChunks := (fileSize + chunkSize - 1) / chunkSize
 
-	// Скользящее окно
-	windowSize := 5
+	windowSize := 3 // Размер окна (отправляем 3 пакета перед ожиданием ACK)
 	sentChunks := make([]bool, numChunks)
 	ackedChunks := make([]bool, numChunks)
 	nextChunk := 0
 
-	// Очистка экрана и вывод заголовков
 	fmt.Print("\033[H\033[2J") // Очистка экрана
 	fmt.Println("Uploading file:", filename)
 	fmt.Println("Total chunks:", numChunks)
@@ -168,7 +157,6 @@ func uploadFileUDP(conn *net.UDPConn, filename string) {
 	fmt.Println("----------------------------------------")
 
 	for nextChunk < numChunks || !allAcked(ackedChunks) {
-		// Отправка пакетов в пределах окна
 		for i := nextChunk; i < nextChunk+windowSize && i < numChunks; i++ {
 			if !sentChunks[i] {
 				startPos := i * chunkSize
@@ -184,17 +172,13 @@ func uploadFileUDP(conn *net.UDPConn, filename string) {
 				}
 
 				sentChunks[i] = true
-				updateLine(5, "Sent chunks: %d/%d", i+1, numChunks)
 			}
 		}
 
-		// Ожидание подтверждений
-		conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+		conn.SetReadDeadline(time.Now().Add(1 * time.Millisecond))
 		n, _, err := conn.ReadFromUDP(respBuffer)
 		if err != nil {
 			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
-				// Таймаут, повторная отправка неподтвержденных пакетов
-				updateLine(6, "Timeout, resending unacked chunks")
 				for i := nextChunk; i < nextChunk+windowSize && i < numChunks; i++ {
 					if !ackedChunks[i] {
 						sentChunks[i] = false
@@ -215,24 +199,21 @@ func uploadFileUDP(conn *net.UDPConn, filename string) {
 				return
 			}
 
-			ackedChunks[chunkIndex] = true
-			updateLine(7, "Acked chunks: %d/%d", chunkIndex+1, numChunks)
+			for i := nextChunk; i <= chunkIndex && i < numChunks; i++ {
+				ackedChunks[i] = true
+			}
 
-			if chunkIndex == nextChunk {
-				for nextChunk < numChunks && ackedChunks[nextChunk] {
-					nextChunk++
-				}
+			if chunkIndex >= nextChunk {
+				nextChunk = chunkIndex + 1
 			}
 		}
 	}
 
-	// Отправка маркера EOF
 	_, err = conn.Write([]byte("EOF"))
 	if err != nil {
 		fmt.Println("\nError sending EOF marker:", err)
 	}
 
-	// Ожидание финального ответа от сервера
 	retries := 3
 	for i := 0; i < retries; i++ {
 		conn.SetReadDeadline(time.Now().Add(5 * time.Second))
