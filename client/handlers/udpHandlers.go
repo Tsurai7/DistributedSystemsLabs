@@ -103,119 +103,125 @@ func sendUDPCommand(conn *net.UDPConn, command string) {
 }
 
 func uploadFileUDP(conn *net.UDPConn, filename string) {
-    start := time.Now()
-    
-    // Read the file to be uploaded
-    fileData, err := os.ReadFile(filename)
-    if err != nil {
-        fmt.Println("Error reading file:", err)
-        return
-    }
-    
-    fileSize := len(fileData)
-    fmt.Printf("Starting upload of '%s' (%d bytes)\n", filename, fileSize)
-    
-    // Increase UDP send buffer size
-    conn.SetWriteBuffer(8 * 1024 * 1024) // 8MB buffer
-    
-    // Send upload command with filename only
-    uploadCmd := fmt.Sprintf("UPLOAD %s", filename)
-    _, err = conn.Write([]byte(uploadCmd))
-    if err != nil {
-        fmt.Println("Error sending upload command:", err)
-        return
-    }
-    
-    // Wait for READY response from server
-    respBuffer := make([]byte, 1024)
-    conn.SetReadDeadline(time.Now().Add(5 * time.Second))
-    n, _, err := conn.ReadFromUDP(respBuffer)
-    if err != nil {
-        fmt.Println("Error receiving initial response:", err)
-        return
-    }
-    
-    initialResponse := string(respBuffer[:n])
-    if !strings.HasPrefix(initialResponse, "READY:") {
-        fmt.Println("Server not ready:", initialResponse)
-        return
-    }
-    
-    fmt.Println("Server response:", initialResponse)
-    
-    // Reset deadline
-    conn.SetReadDeadline(time.Time{})
-    
-    // A slight delay to ensure server is in upload mode
-    time.Sleep(100 * time.Millisecond)
-    
-    // Define chunk size
-    chunkSize := 1280
-    
-    // Calculate number of chunks
-    numChunks := (fileSize + chunkSize - 1) / chunkSize
-    
-    // Send file in chunks
-    sentBytes := 0
-    lastUpdate := time.Now()
-    
-    for i := 0; i < numChunks; i++ {
-        // Calculate chunk boundaries
-        startPos := i * chunkSize
-        endPos := startPos + chunkSize
-        if endPos > fileSize {
-            endPos = fileSize
-        }
-        
-        // Send the chunk
-        _, err = conn.Write(fileData[startPos:endPos])
-        if err != nil {
-            fmt.Println("Error sending file chunk:", err)
-            return
-        }
-        
-        sentBytes += endPos - startPos
-        
-        // Update progress at most 10 times per second
-        if time.Since(lastUpdate) > 100*time.Millisecond || i == numChunks-1 {
-            elapsed := time.Since(start).Seconds()
-            speed := float64(sentBytes) / (1024 * 1024 * elapsed) // MB/s
-            fmt.Printf("\rProgress: %.1f%% (%d/%d bytes) - %.2f MB/s", 
-                      float64(sentBytes)*100/float64(fileSize), 
-                      sentBytes, fileSize, speed)
-            lastUpdate = time.Now()
-        }
-    }
-    
-    // Wait a moment to ensure all chunks are processed
-    time.Sleep(100 * time.Millisecond)
-    
-    // Signal end of file by sending a small termination packet
-    _, err = conn.Write([]byte("EOF"))
-    if err != nil {
-        fmt.Println("\nError sending EOF marker:", err)
-    }
-    
-    // Wait for final acknowledgment from server
-    conn.SetReadDeadline(time.Now().Add(5 * time.Second))
-    n, _, err = conn.ReadFromUDP(respBuffer)
-    if err != nil {
-        if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
-            fmt.Println("\nNo final response from server, but upload may have succeeded")
-        } else {
-            fmt.Println("\nError receiving final response:", err)
-        }
-    } else {
-        fmt.Println("\nServer response:", string(respBuffer[:n]))
-    }
-    
-    elapsed := time.Since(start).Seconds()
-    speed := float64(fileSize) / (1024 * 1024 * elapsed) // MB/s
-    fmt.Printf("File '%s' uploaded in %.2f seconds (%.2f MB/s)\n", 
-              filename, elapsed, speed)
+	start := time.Now()
+
+	// Чтение файла для загрузки
+	fileData, err := os.ReadFile(filename)
+	if err != nil {
+		fmt.Println("Error reading file:", err)
+		return
+	}
+
+	fileSize := len(fileData)
+	fmt.Printf("Starting upload of '%s' (%d bytes)\n", filename, fileSize)
+
+	// Увеличение буфера отправки UDP
+	conn.SetWriteBuffer(8 * 1024 * 1024) // 8 МБ буфер
+
+	// Отправка команды UPLOAD с именем файла
+	uploadCmd := fmt.Sprintf("UPLOAD %s", filename)
+	_, err = conn.Write([]byte(uploadCmd))
+	if err != nil {
+		fmt.Println("Error sending upload command:", err)
+		return
+	}
+
+	// Ожидание ответа READY от сервера
+	respBuffer := make([]byte, 1024)
+	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	n, _, err := conn.ReadFromUDP(respBuffer)
+	if err != nil {
+		fmt.Println("Error receiving initial response:", err)
+		return
+	}
+
+	initialResponse := string(respBuffer[:n])
+	if !strings.HasPrefix(initialResponse, "READY:") {
+		fmt.Println("Server not ready:", initialResponse)
+		return
+	}
+
+	fmt.Println("Server response:", initialResponse)
+
+	// Сброс таймаута чтения
+	conn.SetReadDeadline(time.Time{})
+
+	// Размер чанка (меньше MTU для UDP)
+	chunkSize := 1280
+
+	// Количество чанков
+	numChunks := (fileSize + chunkSize - 1) / chunkSize
+
+	// Отправка файла по частям
+	sentBytes := 0
+	lastUpdate := time.Now()
+
+	for i := 0; i < numChunks; i++ {
+		// Границы чанка
+		startPos := i * chunkSize
+		endPos := startPos + chunkSize
+		if endPos > fileSize {
+			endPos = fileSize
+		}
+
+		// Отправка чанка
+		_, err = conn.Write(fileData[startPos:endPos])
+		if err != nil {
+			fmt.Println("Error sending file chunk:", err)
+			return
+		}
+
+		sentBytes += endPos - startPos
+
+		// Логирование прогресса
+		if time.Since(lastUpdate) > 100*time.Millisecond || i == numChunks-1 {
+			elapsed := time.Since(start).Seconds()
+			speed := float64(sentBytes) / (1024 * 1024 * elapsed) // MB/s
+			fmt.Printf("\rProgress: %.1f%% (%d/%d bytes) - %.2f MB/s",
+				float64(sentBytes)*100/float64(fileSize),
+				sentBytes, fileSize, speed)
+			lastUpdate = time.Now()
+		}
+	}
+
+	// Отправка маркера EOF
+	_, err = conn.Write([]byte("EOF"))
+	if err != nil {
+		fmt.Println("\nError sending EOF marker:", err)
+	}
+
+	// Ожидание финального ответа от сервера
+	retries := 3
+	for i := 0; i < retries; i++ {
+		// Очистка буфера перед чтением
+		for i := range respBuffer {
+			respBuffer[i] = 0
+		}
+
+		conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+		n, _, err := conn.ReadFromUDP(respBuffer)
+		if err != nil {
+			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+				fmt.Printf("\nRetry %d: No final response from server\n", i+1)
+				continue
+			} else {
+				fmt.Println("\nError receiving final response:", err)
+				break
+			}
+		} else {
+			fmt.Println("\nServer response:", string(respBuffer[:n]))
+			break
+		}
+	}
+
+	conn.SetReadDeadline(time.Time{})
+
+	// Вывод статистики
+	elapsed := time.Since(start).Seconds()
+	speed := float64(fileSize) / (1024 * 1024 * elapsed) // MB/s
+	fmt.Printf("File '%s' uploaded in %.2f seconds (%.2f MB/s)\n",
+		filename, elapsed, speed)
 }
-
-
 
 func downloadFileUDP(conn *net.UDPConn, filename string) {
 	start := time.Now()

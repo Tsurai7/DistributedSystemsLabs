@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -67,8 +68,7 @@ func handleTime(conn *net.UDPConn, addr *net.UDPAddr) {
 	sendResponse(conn, addr, currentTime)
 }
 
-
-// WORKS!!!
+// WORKS!
 func handleUpload(conn *net.UDPConn, addr *net.UDPAddr, filename string) {
 	if filename == "" {
 		sendResponse(conn, addr, "ERROR: Filename required for upload")
@@ -76,14 +76,12 @@ func handleUpload(conn *net.UDPConn, addr *net.UDPAddr, filename string) {
 	}
 
 	fmt.Printf("Receiving upload for file '%s' from %s\n", filename, addr.String())
-
-	// Send acknowledgment that we're ready to receive
 	sendResponse(conn, addr, fmt.Sprintf("READY: Waiting for '%s' data", filename))
 
-	// Increase UDP receive buffer size
-	conn.SetReadBuffer(8 * 1024 * 1024) // 8MB buffer
+	// Увеличение буфера чтения
+	conn.SetReadBuffer(1024 * 1024) // 1 МБ буфер
 
-	// Create file to save data
+	// Создание файла для записи
 	outputFile, err := os.Create(filename)
 	if err != nil {
 		sendResponse(conn, addr, fmt.Sprintf("ERROR: Could not create file: %v", err))
@@ -91,29 +89,36 @@ func handleUpload(conn *net.UDPConn, addr *net.UDPAddr, filename string) {
 	}
 	defer outputFile.Close()
 
-	// Use buffered writer for better performance
-	bufWriter := bufio.NewWriterSize(outputFile, 64*1024) // 64KB buffer
+	// Буферизованная запись в файл
+	bufWriter := bufio.NewWriterSize(outputFile, 64*1024) // 64 КБ буфер
 	defer bufWriter.Flush()
 
-	// Read chunks from client
-	buffer := make([]byte, 1500) // Slightly larger than chunk size
+	buffer := make([]byte, 65507) // Максимальный размер UDP-пакета
 	totalBytes := 0
 	lastUpdate := time.Now()
 	start := time.Now()
 	noDataCount := 0
 
-	for {
-		// Set a short timeout for each read
-		conn.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
+	// Битовая карта для отслеживания полученных чанков
+	chunkSize := 1280
+	receivedChunks := make(map[int]bool)
 
-		// Read a chunk
+	for {
+		// Установка таймаута чтения
+		conn.SetReadDeadline(time.Now().Add(2 * time.Second)) // Таймаут 2 секунды
+
+		// Очистка буфера перед чтением
+		for i := range buffer {
+			buffer[i] = 0
+		}
+
 		n, clientAddr, err := conn.ReadFromUDP(buffer)
 		if err != nil {
 			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
-				// Count empty reads
 				noDataCount++
-				if noDataCount >= 30 { // 3 seconds of no data (30 * 100ms)
-					break // Assume transfer complete
+				if noDataCount >= 3 { // 6 секунд без данных
+					fmt.Println("No data for 6 seconds, assuming transfer complete")
+					break
 				}
 				continue
 			}
@@ -122,31 +127,41 @@ func handleUpload(conn *net.UDPConn, addr *net.UDPAddr, filename string) {
 			return
 		}
 
-		// Make sure it's from the expected client
+		// Игнорирование пакетов от других клиентов
 		if clientAddr.String() != addr.String() {
-			continue // Ignore packets from other clients
+			fmt.Println("Ignoring packet from unexpected client:", clientAddr.String())
+			continue
 		}
 
-		// Reset no-data counter if we got data
-		noDataCount = 0
+		noDataCount = 0 // Сброс счетчика отсутствия данных
 
-		// Check if it's an EOF marker
-		if n <= 5 && string(buffer[:n]) == "EOF" {
-			fmt.Println("Received EOF marker")
+		// Проверка маркера EOF
+		if n > 0 && string(buffer[:n]) == "EOF" {
+			fmt.Println("Received EOF marker, ending upload.")
 			break
 		}
 
-		// Write the chunk to buffered writer
-		_, err = bufWriter.Write(buffer[:n])
-		if err != nil {
+		// Проверка запроса на доотправку
+		if n > 0 && strings.HasPrefix(string(buffer[:n]), "RESEND:") {
+			// Обработка запроса на доотправку
+			handleResendRequest(conn, addr, string(buffer[:n]), receivedChunks, chunkSize)
+			continue
+		}
+
+		// Запись данных в файл
+		if _, err := bufWriter.Write(buffer[:n]); err != nil {
 			fmt.Println("Error writing to file:", err)
 			sendResponse(conn, addr, fmt.Sprintf("ERROR: Write failed: %v", err))
 			return
 		}
 
+		// Обновление битовой карты полученных чанков
+		chunkIndex := totalBytes / chunkSize
+		receivedChunks[chunkIndex] = true
+
 		totalBytes += n
 
-		// Update progress at most 10 times per second
+		// Логирование прогресса
 		if time.Since(lastUpdate) > 100*time.Millisecond {
 			elapsed := time.Since(start).Seconds()
 			if elapsed > 0 {
@@ -157,16 +172,49 @@ func handleUpload(conn *net.UDPConn, addr *net.UDPAddr, filename string) {
 		}
 	}
 
-	// Make sure all data is flushed to disk
-	bufWriter.Flush()
+	// Финализация записи
+	if err := bufWriter.Flush(); err != nil {
+		fmt.Println("Error flushing buffer:", err)
+		sendResponse(conn, addr, fmt.Sprintf("ERROR: Flush failed: %v", err))
+		return
+	}
 
+	// Вывод статистики
 	elapsed := time.Since(start).Seconds()
 	speed := float64(totalBytes) / (1024 * 1024 * elapsed) // MB/s
 	fmt.Printf("\nFile '%s' received successfully (%d bytes in %.2f seconds, %.2f MB/s)\n",
 		filename, totalBytes, elapsed, speed)
 
-	// Send confirmation to client
-	sendResponse(conn, addr, fmt.Sprintf("SUCCESS: File '%s' uploaded (%d bytes)", filename, totalBytes))
+	// Отправка финального подтверждения клиенту
+	finalResponse := fmt.Sprintf("SUCCESS: File '%s' uploaded (%d bytes)", filename, totalBytes)
+	_, err = conn.WriteToUDP([]byte(finalResponse), addr)
+	if err != nil {
+		fmt.Println("Error sending final response:", err)
+	}
+
+	conn.SetReadDeadline(time.Time{})
+}
+
+func handleResendRequest(conn *net.UDPConn, addr *net.UDPAddr, request string, receivedChunks map[int]bool, chunkSize int) {
+	// Разбор запроса на доотправку
+	parts := strings.Split(request, ":")
+	if len(parts) < 2 {
+		sendResponse(conn, addr, "ERROR: Invalid RESEND request")
+		return
+	}
+
+	// Отправка запрошенных чанков
+	for _, chunkIndex := range strings.Split(parts[1], ",") {
+		index, err := strconv.Atoi(chunkIndex)
+		if err != nil {
+			fmt.Println("Invalid chunk index:", err)
+			continue
+		}
+
+		if !receivedChunks[index] {
+			sendResponse(conn, addr, fmt.Sprintf("RESEND:%d", index))
+		}
+	}
 }
 
 func handleDownload(conn *net.UDPConn, addr *net.UDPAddr, filename string) {
