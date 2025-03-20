@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"bufio"
+	"encoding/binary"
 	"fmt"
 	"net"
 	"os"
@@ -271,11 +272,12 @@ func downloadFileUDP(conn *net.UDPConn, filename string) {
 
 	buffer := make([]byte, 1500)
 	totalBytes := 0
-	lastUpdate := time.Now()
+	//lastUpdate := time.Now()
 	noDataCount := 0
+	expectedSeqNum := uint32(0)
 
 	for {
-		conn.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
+		conn.SetReadDeadline(time.Now().Add(500 * time.Millisecond)) // Увеличенный таймаут
 
 		n, _, err := conn.ReadFromUDP(buffer)
 		if err != nil {
@@ -290,26 +292,28 @@ func downloadFileUDP(conn *net.UDPConn, filename string) {
 			return
 		}
 
-		noDataCount = 0
-
-		if n < 100 && strings.HasPrefix(string(buffer[:n]), "ERROR:") {
-			fmt.Println(string(buffer[:n]))
-			return
+		if n > 0 && string(buffer[:n]) == "EOF" {
+			break
 		}
 
-		_, err = bufWriter.Write(buffer[:n])
-		if err != nil {
-			fmt.Println("Error writing to file:", err)
-			return
-		}
+		seqNum := binary.BigEndian.Uint32(buffer[:4])
+		fmt.Printf("Received packet %d\n", seqNum) // Логирование
 
-		totalBytes += n
+		if seqNum == expectedSeqNum {
+			_, err = bufWriter.Write(buffer[4:n])
+			if err != nil {
+				fmt.Println("Error writing to file:", err)
+				return
+			}
 
-		if time.Since(lastUpdate) > 100*time.Millisecond {
-			elapsed := time.Since(start).Seconds()
-			speed := float64(totalBytes) / (1024 * 1024 * elapsed)
-			fmt.Printf("\rReceived: %d bytes (%.2f MB/s)", totalBytes, speed)
-			lastUpdate = time.Now()
+			totalBytes += n - 4
+			expectedSeqNum++
+
+			sendACK(conn, seqNum)
+			fmt.Printf("Sent ACK for packet %d\n", seqNum) // Логирование
+		} else if seqNum < expectedSeqNum {
+			sendACK(conn, seqNum)
+			fmt.Printf("Sent ACK for out-of-order packet %d\n", seqNum) // Логирование
 		}
 	}
 
@@ -319,4 +323,13 @@ func downloadFileUDP(conn *net.UDPConn, filename string) {
 	speed := float64(totalBytes) / (1024 * 1024 * elapsed)
 	fmt.Printf("\nFile '%s' downloaded successfully (%d bytes in %.2f seconds, %.2f MB/s)\n",
 		filename, totalBytes, elapsed, speed)
+}
+
+func sendACK(conn *net.UDPConn, seqNum uint32) {
+	buf := make([]byte, 4)
+	binary.BigEndian.PutUint32(buf, seqNum)
+	_, err := conn.Write(buf) // Используем Write вместо WriteToUDP
+	if err != nil {
+		fmt.Printf("Error sending ACK for packet %d: %v\n", seqNum, err)
+	}
 }
