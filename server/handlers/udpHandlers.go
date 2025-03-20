@@ -13,38 +13,24 @@ import (
 )
 
 const (
-	DatagramSize  = 1500 // Recommended datagram size per ethernet mtu limitations
-	SlidingWindow = 8    // We will receive ACK for 3 packages
-	BuffSize      = 64 * 1024 * 1024
-	UdpTimeout    = time.Millisecond * 100
+	UdpDatagramSize = 1400 // Recommended datagram size per ethernet mtu limitations
+	SlidingWindow   = 3    // We will receive ACK for 3 packages
+	BuffSize        = 64 * 1024 * 1024
+	chunkSize       = 1400
+	windowSize      = 10
+	ackTimeout      = 100 * time.Millisecond
+	maxRetries      = 3 // 64 MBs
 )
+
+const ()
 
 type Packet struct {
 	SeqNum uint32
 	Data   []byte
 }
 
-// ProgressBar displays a simple progress bar in console
-func ProgressBar(current, total int, operation string) {
-	const barLength = 50
-	percent := float64(current) / float64(total)
-	filled := int(barLength * percent)
-
-	bar := "["
-	for i := 0; i < barLength; i++ {
-		if i < filled {
-			bar += "="
-		} else {
-			bar += " "
-		}
-	}
-	bar += "]"
-
-	fmt.Printf("\r%s %s %.2f%% (%d/%d)", operation, bar, percent*100, current, total)
-}
-
 func HandleUdpConnections(conn *net.UDPConn) {
-	buffer := make([]byte, DatagramSize)
+	buffer := make([]byte, UdpDatagramSize)
 
 	for {
 		n, addr, err := conn.ReadFromUDP(buffer)
@@ -59,9 +45,7 @@ func HandleUdpConnections(conn *net.UDPConn) {
 
 func processCommand(conn *net.UDPConn, addr *net.UDPAddr, data []byte) {
 	cmd := strings.TrimSpace(string(data))
-
-	// Разбиваем команду на части, учитывая что и UPLOAD и DOWNLOAD могут иметь offset
-	parts := strings.SplitN(cmd, " ", 3)
+	parts := strings.SplitN(cmd, " ", 2)
 
 	if len(parts) == 0 {
 		sendResponse(conn, addr, "ERROR: Empty command")
@@ -69,48 +53,20 @@ func processCommand(conn *net.UDPConn, addr *net.UDPAddr, data []byte) {
 	}
 
 	command := strings.ToUpper(parts[0])
+	var param string
+	if len(parts) > 1 {
+		param = parts[1]
+	}
 
 	switch command {
 	case "ECHO":
-		param := ""
-		if len(parts) > 1 {
-			param = parts[1]
-		}
 		handleEcho(conn, addr, param)
-
 	case "TIME":
 		handleTime(conn, addr)
-
 	case "UPLOAD":
-		// Обрабатываем два варианта:
-		// 1. UPLOAD filename
-		// 2. UPLOAD filename offset
-		if len(parts) < 2 {
-			sendResponse(conn, addr, "ERROR: Filename required for upload")
-			return
-		}
-
-		params := []string{parts[1]} // filename
-		if len(parts) > 2 {
-			params = append(params, parts[2]) // добавляем offset если есть
-		}
-		handleUpload(conn, addr, params)
-
+		handleUpload(conn, addr, param)
 	case "DOWNLOAD":
-		// Обрабатываем два варианта:
-		// 1. DOWNLOAD filename
-		// 2. DOWNLOAD filename offset
-		if len(parts) < 2 {
-			sendResponse(conn, addr, "ERROR: Filename required for download")
-			return
-		}
-
-		params := []string{parts[1]} // filename
-		if len(parts) > 2 {
-			params = append(params, parts[2]) // добавляем offset если есть
-		}
-		handleDownload(conn, addr, params)
-
+		handleDownload(conn, addr, param)
 	default:
 		sendResponse(conn, addr, fmt.Sprintf("ERROR: Unknown command '%s'", command))
 	}
@@ -125,42 +81,20 @@ func handleTime(conn *net.UDPConn, addr *net.UDPAddr) {
 	sendResponse(conn, addr, currentTime)
 }
 
-func handleUpload(conn *net.UDPConn, addr *net.UDPAddr, args []string) {
-	defer conn.SetReadDeadline(time.Time{})
-	if len(args) < 1 {
+func handleUpload(conn *net.UDPConn, addr *net.UDPAddr, filename string) {
+	if filename == "" {
 		sendResponse(conn, addr, "ERROR: Filename required for upload")
 		return
 	}
 
-	filename := args[0]
-	offset := 0
-	if len(args) > 1 {
-		var err error
-		offset, err = strconv.Atoi(args[1])
-		if err != nil || offset < 0 {
-			sendResponse(conn, addr, "ERROR: Invalid offset value")
-			return
-		}
-	}
+	fmt.Printf("Receiving upload for file '%s' from %s\n", filename, addr.String())
+	sendResponse(conn, addr, fmt.Sprintf("READY: Waiting for '%s' data", filename))
 
-	fmt.Printf("\nReceiving upload for file '%s' from %s (offset: %d)\n",
-		filename, addr.String(), offset)
+	conn.SetReadBuffer(BuffSize)
 
-	// Открываем файл для дозаписи или создаем новый
-	var outputFile *os.File
-	var err error
-
-	if offset > 0 {
-		outputFile, err = os.OpenFile(filename, os.O_WRONLY|os.O_CREATE, 0644)
-		if err == nil {
-			_, err = outputFile.Seek(int64(offset), 0)
-		}
-	} else {
-		outputFile, err = os.Create(filename)
-	}
-
+	outputFile, err := os.Create(filename)
 	if err != nil {
-		sendResponse(conn, addr, fmt.Sprintf("ERROR: Could not open file: %v", err))
+		sendResponse(conn, addr, fmt.Sprintf("ERROR: Could not create file: %v", err))
 		return
 	}
 	defer outputFile.Close()
@@ -168,136 +102,121 @@ func handleUpload(conn *net.UDPConn, addr *net.UDPAddr, args []string) {
 	bufWriter := bufio.NewWriterSize(outputFile, BuffSize)
 	defer bufWriter.Flush()
 
-	// Немедленная отправка подтверждения
-	sendResponse(conn, addr, fmt.Sprintf("READY: Offset %d", offset))
-
-	buffer := make([]byte, DatagramSize)
-	totalBytes := offset
+	buffer := make([]byte, UdpDatagramSize)
+	totalBytes := 0
 	start := time.Now()
-	lastProgressUpdate := time.Now()
-	lastAckTime := time.Now()
-	eofReceived := false
+	noDataCount := 0
 
-	// Для отслеживания полученных чанков
 	receivedChunks := make(map[int]bool)
+	ackCounter := 0
 
-	// Настройки таймаутов
-	normalTimeout := UdpTimeout
-	finalTimeout := UdpTimeout
-	currentTimeout := normalTimeout
+	fmt.Print("\033[H\033[2J") // Очистка экрана
+	fmt.Println("Receiving upload for file:", filename)
+	fmt.Println("----------------------------------------")
 
 	for {
-		// Обновляем прогресс
-		if time.Since(lastProgressUpdate) > UdpTimeout {
-			go ProgressBar(totalBytes, totalBytes, "Receiving")
-			lastProgressUpdate = time.Now()
-		}
-
-		// Устанавливаем таймаут
-		conn.SetReadDeadline(time.Now().Add(currentTimeout))
-
+		conn.SetReadDeadline(time.Now().Add(1 * time.Millisecond))
 		n, clientAddr, err := conn.ReadFromUDP(buffer)
 		if err != nil {
 			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
-				if eofReceived && time.Since(lastAckTime) > finalTimeout {
+				noDataCount++
+				if noDataCount >= 3 {
 					break
 				}
 				continue
 			}
-			fmt.Println("\nError receiving data:", err)
+			fmt.Println("Error receiving data:", err)
 			return
 		}
 
-		// Проверяем адрес отправителя
 		if clientAddr.String() != addr.String() {
 			continue
 		}
 
-		// Обработка EOF
-		if n >= 3 && string(buffer[:3]) == "EOF" {
-			if !eofReceived {
-				eofReceived = true
-				currentTimeout = finalTimeout
-				fmt.Println("\nEOF marker received, finalizing...")
-				sendResponse(conn, addr, "ACKEOF")
-			}
+		noDataCount = 0
+
+		if n > 0 && string(buffer[:n]) == "EOF" {
+			break
+		}
+
+		if n > 0 && strings.HasPrefix(string(buffer[:n]), "RESEND:") {
+			handleResendRequest(conn, addr, string(buffer[:n]), receivedChunks, UdpDatagramSize)
 			continue
 		}
 
-		// Обработка данных
-		chunkIndex := totalBytes / DatagramSize
+		chunkIndex := totalBytes / UdpDatagramSize
 		if !receivedChunks[chunkIndex] {
 			if _, err := bufWriter.Write(buffer[:n]); err != nil {
-				fmt.Println("\nError writing to file:", err)
-				sendResponse(conn, addr, fmt.Sprintf("ERROR: Write failed: %v", err))
+				fmt.Println("Error writing to file:", err)
 				return
 			}
 
 			receivedChunks[chunkIndex] = true
 			totalBytes += n
-			lastAckTime = time.Now()
+			ackCounter++
 
-			// Отправляем подтверждение
-			ack := fmt.Sprintf("ACK:%d", chunkIndex)
-			if _, err := conn.WriteToUDP([]byte(ack), addr); err != nil {
-				fmt.Println("\nError sending ACK:", err)
+			if ackCounter >= SlidingWindow {
+				ack := fmt.Sprintf("ACK:%d", chunkIndex)
+				conn.WriteToUDP([]byte(ack), addr)
+				ackCounter = 0
 			}
 		}
 	}
 
-	// Финальные операции
 	if err := bufWriter.Flush(); err != nil {
-		fmt.Println("\nError flushing buffer:", err)
+		fmt.Println("Error flushing buffer:", err)
 		sendResponse(conn, addr, fmt.Sprintf("ERROR: Flush failed: %v", err))
 		return
 	}
 
 	elapsed := time.Since(start).Seconds()
-	speed := float64(totalBytes-offset) / (1024 * 1024 * elapsed)
-	go ProgressBar(totalBytes, totalBytes, "Receiving")
+	speed := float64(totalBytes) / (1024 * 1024 * elapsed)
 	fmt.Printf("\nFile '%s' received successfully (%d bytes in %.2f seconds, %.2f MB/s)\n",
-		filename, totalBytes-offset, elapsed, speed)
+		filename, totalBytes, elapsed, speed)
 
-	// Отправляем финальное подтверждение
-	finalResponse := fmt.Sprintf("SUCCESS: Received %d bytes (total %d)", totalBytes-offset, totalBytes)
-	for i := 0; i < 3; i++ {
-		sendResponse(conn, addr, finalResponse)
-		time.Sleep(50 * time.Millisecond)
+	finalResponse := fmt.Sprintf("SUCCESS: File '%s' uploaded (%d bytes)\n", filename, totalBytes)
+	_, err = conn.WriteToUDP([]byte(finalResponse), addr)
+	if err != nil {
+		fmt.Println("Error sending final response:", err)
 	}
+
+	conn.SetReadDeadline(time.Time{})
+}
+
+func handleResendRequest(conn *net.UDPConn, addr *net.UDPAddr, resendCmd string, receivedChunks map[int]bool, chunkSize int) {
+	parts := strings.Split(resendCmd, ":")
+	if len(parts) < 2 {
+		fmt.Println("Invalid RESEND command:", resendCmd)
+		return
+	}
+
+	chunkIndex, err := strconv.Atoi(parts[1])
+	if err != nil {
+		fmt.Println("Invalid chunk index in RESEND command:", parts[1])
+		return
+	}
+
+	if !receivedChunks[chunkIndex] {
+		fmt.Printf("Requested chunk %d not found\n", chunkIndex)
+		return
+	}
+
+	// Отправляем подтверждение для запрошенного чанка
+	ack := fmt.Sprintf("ACK:%d", chunkIndex)
+	conn.WriteToUDP([]byte(ack), addr)
+	fmt.Printf("Resent ACK for chunk %d\n", chunkIndex)
 }
 
 func sendResponse(conn *net.UDPConn, addr *net.UDPAddr, message string) {
-	if _, err := conn.WriteToUDP([]byte(message), addr); err != nil {
+	_, err := conn.WriteToUDP([]byte(message), addr)
+	if err != nil {
 		fmt.Println("Error sending response:", err)
 	}
 }
 
-func handleDownload(conn *net.UDPConn, addr *net.UDPAddr, args []string) {
-	if len(args) < 1 {
+func handleDownload(conn *net.UDPConn, addr *net.UDPAddr, filename string) {
+	if filename == "" {
 		sendResponse(conn, addr, "ERROR: Filename required for download")
-		return
-	}
-	defer conn.SetReadDeadline(time.Time{})
-
-	filename := args[0]
-	offset := 0
-	if len(args) > 1 {
-		var err error
-		offset, err = strconv.Atoi(args[1])
-		if err != nil || offset < 0 {
-			sendResponse(conn, addr, "ERROR: Invalid offset value")
-			return
-		}
-	}
-
-	fileInfo, err := os.Stat(filename)
-	if err != nil {
-		sendResponse(conn, addr, fmt.Sprintf("ERROR: File not found: %v", err))
-		return
-	}
-
-	if fileInfo.IsDir() {
-		sendResponse(conn, addr, "ERROR: Cannot download directory")
 		return
 	}
 
@@ -308,106 +227,82 @@ func handleDownload(conn *net.UDPConn, addr *net.UDPAddr, args []string) {
 	}
 
 	fileSize := len(fileData)
-	if offset > fileSize {
-		sendResponse(conn, addr, "ERROR: Offset exceeds file size")
-		return
-	}
+	fmt.Printf("Sending file '%s' (%d bytes) to %s\n", filename, fileSize, addr.String())
 
-	fmt.Printf("\nSending file '%s' (%d bytes) to %s starting from offset %d\n",
-		filename, fileSize, addr.String(), offset)
-
-	// First send file size to client
-	sendResponse(conn, addr, fmt.Sprintf("%d", fileSize))
-
-	if fileSize-offset <= DatagramSize {
-		_, err = conn.WriteToUDP(fileData[offset:], addr)
+	if fileSize <= chunkSize {
+		_, err = conn.WriteToUDP(fileData, addr)
 		if err != nil {
-			fmt.Printf("\nError sending file to client: %v\n", err)
+			fmt.Printf("Error sending file to client: %v\n", err)
 		}
 		return
 	}
 
-	conn.SetWriteBuffer(BuffSize)
+	conn.SetWriteBuffer(1024 * 1024)
 
-	// Calculate chunks considering the offset
-	remainingData := fileData[offset:]
-	remainingSize := len(remainingData)
-	numChunks := (remainingSize + DatagramSize - 1) / DatagramSize
+	numChunks := (fileSize + chunkSize - 1) / chunkSize
 	start := time.Now()
 	sentBytes := 0
-	lastProgressUpdate := time.Now()
 
-	window := make([]Packet, SlidingWindow)
-	ackChan := make(chan uint32, SlidingWindow)
-	retryChan := make(chan uint32, SlidingWindow)
+	window := make([]Packet, windowSize)
+	ackChan := make(chan uint32, windowSize)
+	retryChan := make(chan uint32, windowSize)
 
 	go receiveACKs(conn, ackChan)
 
-	// Calculate starting sequence number based on offset
-	startSeq := offset / DatagramSize
-	i := 0
-
-	for i < numChunks {
-		if time.Since(lastProgressUpdate) > UdpTimeout {
-			go ProgressBar(sentBytes+offset, fileSize, "Sending")
-			lastProgressUpdate = time.Now()
-		}
-
-		// Fill the window
-		for j := 0; j < SlidingWindow && i+j < numChunks; j++ {
-			startPos := (i + j) * DatagramSize
-			endPos := startPos + DatagramSize
-			if endPos > remainingSize {
-				endPos = remainingSize
+	for i := 0; i < numChunks; {
+		for j := 0; j < windowSize && i+j < numChunks; j++ {
+			startPos := (i + j) * chunkSize
+			endPos := startPos + chunkSize
+			if endPos > fileSize {
+				endPos = fileSize
 			}
 
 			packet := Packet{
-				SeqNum: uint32(startSeq + i + j), // Use absolute sequence number
-				Data:   remainingData[startPos:endPos],
+				SeqNum: uint32(i + j),
+				Data:   fileData[startPos:endPos],
 			}
 
 			window[j] = packet
 			sendPacket(conn, addr, packet, retryChan)
+			fmt.Printf("Sent packet %d\n", packet.SeqNum) // Логирование
 		}
 
-		// Process ACKs and retries
-		for j := 0; j < SlidingWindow && i < numChunks; j++ {
+		for j := 0; j < windowSize && i < numChunks; j++ {
 			select {
 			case ack := <-ackChan:
-				if ack >= uint32(startSeq+i) {
-					// Calculate how many packets were acked
-					ackedCount := int(ack) - (startSeq + i) + 1
-					for k := 0; k < ackedCount && i < numChunks; k++ {
-						sentBytes += len(window[0].Data)
-						i++
-						window = window[1:]
-						window = append(window, Packet{})
-					}
+				fmt.Printf("Received ACK for packet %d\n", ack) // Логирование
+				if ack == uint32(i) {
+					i++
+					sentBytes += len(window[0].Data)
+					window = window[1:]
+					window = append(window, Packet{})
 				}
-			case seqNum := <-retryChan:
-				fmt.Printf("\nRetrying packet %d\n", seqNum)
-				for _, p := range window {
-					if p.SeqNum == seqNum {
-						sendPacket(conn, addr, p, retryChan)
-						break
-					}
-				}
-			case <-time.After(1 * time.Millisecond):
-				// Timeout for non-acknowledged packets
+			case <-time.After(500 * time.Millisecond): // Увеличенный таймаут
+				fmt.Printf("Timeout for packet %d, retrying...\n", i) // Логирование
+				retryChan <- uint32(i)
 			}
 		}
 	}
 
+	// Отправка маркера завершения
 	_, err = conn.WriteToUDP([]byte("EOF"), addr)
 	if err != nil {
-		fmt.Println("\nError sending EOF marker:", err)
+		fmt.Println("Error sending EOF marker:", err)
 	}
 
 	elapsed := time.Since(start).Seconds()
-	speed := float64(remainingSize) / (1024 * 1024 * elapsed)
-	go ProgressBar(fileSize, fileSize, "Sending")
+	speed := float64(fileSize) / (1024 * 1024 * elapsed)
 	fmt.Printf("\nFile '%s' sent successfully in %.2f seconds (%.2f MB/s)\n",
 		filename, elapsed, speed)
+}
+
+func allAcked(ackedChunks []bool) bool {
+	for _, acked := range ackedChunks {
+		if !acked {
+			return false
+		}
+	}
+	return true
 }
 
 func receiveACKs(conn *net.UDPConn, ackChan chan uint32) {
@@ -415,7 +310,7 @@ func receiveACKs(conn *net.UDPConn, ackChan chan uint32) {
 	for {
 		n, _, err := conn.ReadFromUDP(buffer)
 		if err != nil {
-			fmt.Printf("\nError receiving ACK: %v\n", err)
+			fmt.Printf("Error receiving ACK: %v\n", err)
 			continue
 		}
 
@@ -431,9 +326,9 @@ func sendPacket(conn *net.UDPConn, addr *net.UDPAddr, packet Packet, retryChan c
 	binary.Write(buf, binary.BigEndian, packet.SeqNum)
 	buf.Write(packet.Data)
 
-	_, err := conn.WriteToUDP(buf.Bytes(), addr)
+	_, err := conn.WriteToUDP(buf.Bytes(), addr) // Оставляем WriteToUDP, если используем ListenUDP
 	if err != nil {
-		fmt.Printf("\nError sending packet %d: %v\n", packet.SeqNum, err)
+		fmt.Printf("Error sending packet %d: %v\n", packet.SeqNum, err)
 		retryChan <- packet.SeqNum
 	}
 }
