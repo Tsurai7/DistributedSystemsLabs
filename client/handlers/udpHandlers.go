@@ -15,7 +15,7 @@ const (
 	UdpDatagramSize = 1400             // Recommended datagram size per ethernet mtu limitations
 	SlidingWindow   = 3                // We will receive ACK for 3 packages
 	BuffSize        = 64 * 1024 * 1024 // 64 MBs
-
+	AckTimeout      = 5 * time.Millisecond
 )
 
 func HandleUDPCommands(conn *net.UDPConn, scanner *bufio.Scanner) {
@@ -252,7 +252,7 @@ func allAcked(ackedChunks []bool) bool {
 
 func downloadFileUDP(conn *net.UDPConn, filename string) {
 	start := time.Now()
-	conn.SetReadBuffer(8 * 1024 * 1024)
+	conn.SetReadBuffer(BuffSize)
 
 	_, err := conn.Write([]byte("DOWNLOAD " + filename))
 	if err != nil {
@@ -267,17 +267,16 @@ func downloadFileUDP(conn *net.UDPConn, filename string) {
 	}
 	defer outputFile.Close()
 
-	bufWriter := bufio.NewWriterSize(outputFile, 64*1024)
+	bufWriter := bufio.NewWriterSize(outputFile, BuffSize)
 	defer bufWriter.Flush()
 
-	buffer := make([]byte, 1500)
+	buffer := make([]byte, UdpDatagramSize)
 	totalBytes := 0
-	//lastUpdate := time.Now()
 	noDataCount := 0
 	expectedSeqNum := uint32(0)
 
 	for {
-		conn.SetReadDeadline(time.Now().Add(500 * time.Millisecond)) // Увеличенный таймаут
+		conn.SetReadDeadline(time.Now().Add(10 * time.Millisecond))
 
 		n, _, err := conn.ReadFromUDP(buffer)
 		if err != nil {
@@ -297,7 +296,6 @@ func downloadFileUDP(conn *net.UDPConn, filename string) {
 		}
 
 		seqNum := binary.BigEndian.Uint32(buffer[:4])
-		fmt.Printf("Received packet %d\n", seqNum) // Логирование
 
 		if seqNum == expectedSeqNum {
 			_, err = bufWriter.Write(buffer[4:n])
@@ -310,13 +308,13 @@ func downloadFileUDP(conn *net.UDPConn, filename string) {
 			expectedSeqNum++
 
 			sendACK(conn, seqNum)
-			fmt.Printf("Sent ACK for packet %d\n", seqNum) // Логирование
 		} else if seqNum < expectedSeqNum {
 			sendACK(conn, seqNum)
-			fmt.Printf("Sent ACK for out-of-order packet %d\n", seqNum) // Логирование
+			fmt.Printf("Sent ACK for out-of-order packet %d\n", seqNum)
 		}
 	}
 
+	conn.SetReadDeadline(time.Time{})
 	bufWriter.Flush()
 
 	elapsed := time.Since(start).Seconds()
@@ -328,7 +326,7 @@ func downloadFileUDP(conn *net.UDPConn, filename string) {
 func sendACK(conn *net.UDPConn, seqNum uint32) {
 	buf := make([]byte, 4)
 	binary.BigEndian.PutUint32(buf, seqNum)
-	_, err := conn.Write(buf) // Используем Write вместо WriteToUDP
+	_, err := conn.Write(buf)
 	if err != nil {
 		fmt.Printf("Error sending ACK for packet %d: %v\n", seqNum, err)
 	}

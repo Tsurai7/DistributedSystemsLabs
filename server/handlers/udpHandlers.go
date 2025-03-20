@@ -16,13 +16,9 @@ const (
 	UdpDatagramSize = 1400 // Recommended datagram size per ethernet mtu limitations
 	SlidingWindow   = 3    // We will receive ACK for 3 packages
 	BuffSize        = 64 * 1024 * 1024
-	chunkSize       = 1400
 	windowSize      = 10
-	ackTimeout      = 100 * time.Millisecond
-	maxRetries      = 3 // 64 MBs
+	AckTimeout      = 1 * time.Millisecond
 )
-
-const ()
 
 type Packet struct {
 	SeqNum uint32
@@ -201,7 +197,6 @@ func handleResendRequest(conn *net.UDPConn, addr *net.UDPAddr, resendCmd string,
 		return
 	}
 
-	// Отправляем подтверждение для запрошенного чанка
 	ack := fmt.Sprintf("ACK:%d", chunkIndex)
 	conn.WriteToUDP([]byte(ack), addr)
 	fmt.Printf("Resent ACK for chunk %d\n", chunkIndex)
@@ -229,7 +224,7 @@ func handleDownload(conn *net.UDPConn, addr *net.UDPAddr, filename string) {
 	fileSize := len(fileData)
 	fmt.Printf("Sending file '%s' (%d bytes) to %s\n", filename, fileSize, addr.String())
 
-	if fileSize <= chunkSize {
+	if fileSize <= UdpDatagramSize {
 		_, err = conn.WriteToUDP(fileData, addr)
 		if err != nil {
 			fmt.Printf("Error sending file to client: %v\n", err)
@@ -237,9 +232,9 @@ func handleDownload(conn *net.UDPConn, addr *net.UDPAddr, filename string) {
 		return
 	}
 
-	conn.SetWriteBuffer(1024 * 1024)
+	conn.SetWriteBuffer(BuffSize)
 
-	numChunks := (fileSize + chunkSize - 1) / chunkSize
+	numChunks := (fileSize + UdpDatagramSize - 1) / UdpDatagramSize
 	start := time.Now()
 	sentBytes := 0
 
@@ -251,8 +246,8 @@ func handleDownload(conn *net.UDPConn, addr *net.UDPAddr, filename string) {
 
 	for i := 0; i < numChunks; {
 		for j := 0; j < windowSize && i+j < numChunks; j++ {
-			startPos := (i + j) * chunkSize
-			endPos := startPos + chunkSize
+			startPos := (i + j) * UdpDatagramSize
+			endPos := startPos + UdpDatagramSize
 			if endPos > fileSize {
 				endPos = fileSize
 			}
@@ -264,45 +259,34 @@ func handleDownload(conn *net.UDPConn, addr *net.UDPAddr, filename string) {
 
 			window[j] = packet
 			sendPacket(conn, addr, packet, retryChan)
-			fmt.Printf("Sent packet %d\n", packet.SeqNum) // Логирование
 		}
 
 		for j := 0; j < windowSize && i < numChunks; j++ {
 			select {
 			case ack := <-ackChan:
-				fmt.Printf("Received ACK for packet %d\n", ack) // Логирование
 				if ack == uint32(i) {
 					i++
 					sentBytes += len(window[0].Data)
 					window = window[1:]
 					window = append(window, Packet{})
 				}
-			case <-time.After(500 * time.Millisecond): // Увеличенный таймаут
-				fmt.Printf("Timeout for packet %d, retrying...\n", i) // Логирование
+			case <-time.After(100 * time.Millisecond):
+				fmt.Printf("Timeout for packet %d, retrying...\n", i)
 				retryChan <- uint32(i)
 			}
 		}
 	}
 
-	// Отправка маркера завершения
 	_, err = conn.WriteToUDP([]byte("EOF"), addr)
 	if err != nil {
 		fmt.Println("Error sending EOF marker:", err)
 	}
 
+	conn.SetReadDeadline(time.Time{})
 	elapsed := time.Since(start).Seconds()
 	speed := float64(fileSize) / (1024 * 1024 * elapsed)
 	fmt.Printf("\nFile '%s' sent successfully in %.2f seconds (%.2f MB/s)\n",
 		filename, elapsed, speed)
-}
-
-func allAcked(ackedChunks []bool) bool {
-	for _, acked := range ackedChunks {
-		if !acked {
-			return false
-		}
-	}
-	return true
 }
 
 func receiveACKs(conn *net.UDPConn, ackChan chan uint32) {
@@ -326,7 +310,7 @@ func sendPacket(conn *net.UDPConn, addr *net.UDPAddr, packet Packet, retryChan c
 	binary.Write(buf, binary.BigEndian, packet.SeqNum)
 	buf.Write(packet.Data)
 
-	_, err := conn.WriteToUDP(buf.Bytes(), addr) // Оставляем WriteToUDP, если используем ListenUDP
+	_, err := conn.WriteToUDP(buf.Bytes(), addr)
 	if err != nil {
 		fmt.Printf("Error sending packet %d: %v\n", packet.SeqNum, err)
 		retryChan <- packet.SeqNum
