@@ -252,7 +252,7 @@ func allAcked(ackedChunks []bool) bool {
 
 func downloadFileUDP(conn *net.UDPConn, filename string) {
 	start := time.Now()
-	conn.SetReadBuffer(BuffSize)
+	conn.SetReadBuffer(8 * 1024 * 1024)
 
 	_, err := conn.Write([]byte("DOWNLOAD " + filename))
 	if err != nil {
@@ -277,7 +277,7 @@ func downloadFileUDP(conn *net.UDPConn, filename string) {
 	expectedSeqNum := uint32(0)
 
 	for {
-		conn.SetReadDeadline(time.Now().Add(1 * time.Millisecond))
+		conn.SetReadDeadline(time.Now().Add(500 * time.Millisecond)) // Увеличенный таймаут
 
 		n, _, err := conn.ReadFromUDP(buffer)
 		if err != nil {
@@ -297,7 +297,7 @@ func downloadFileUDP(conn *net.UDPConn, filename string) {
 		}
 
 		seqNum := binary.BigEndian.Uint32(buffer[:4])
-		fmt.Printf("Received packet %d\n", seqNum)
+		fmt.Printf("Received packet %d\n", seqNum) // Логирование
 
 		if seqNum == expectedSeqNum {
 			_, err = bufWriter.Write(buffer[4:n])
@@ -310,10 +310,10 @@ func downloadFileUDP(conn *net.UDPConn, filename string) {
 			expectedSeqNum++
 
 			sendACK(conn, seqNum)
-			fmt.Printf("Sent ACK for packet %d\n", seqNum)
+			fmt.Printf("Sent ACK for packet %d\n", seqNum) // Логирование
 		} else if seqNum < expectedSeqNum {
 			sendACK(conn, seqNum)
-			fmt.Printf("Sent ACK for out-of-order packet %d\n", seqNum)
+			fmt.Printf("Sent ACK for out-of-order packet %d\n", seqNum) // Логирование
 		}
 	}
 

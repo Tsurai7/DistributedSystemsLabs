@@ -229,7 +229,7 @@ func handleDownload(conn *net.UDPConn, addr *net.UDPAddr, filename string) {
 	fileSize := len(fileData)
 	fmt.Printf("Sending file '%s' (%d bytes) to %s\n", filename, fileSize, addr.String())
 
-	if fileSize <= UdpDatagramSize {
+	if fileSize <= chunkSize {
 		_, err = conn.WriteToUDP(fileData, addr)
 		if err != nil {
 			fmt.Printf("Error sending file to client: %v\n", err)
@@ -237,7 +237,7 @@ func handleDownload(conn *net.UDPConn, addr *net.UDPAddr, filename string) {
 		return
 	}
 
-	conn.SetWriteBuffer(BuffSize)
+	conn.SetWriteBuffer(1024 * 1024)
 
 	numChunks := (fileSize + chunkSize - 1) / chunkSize
 	start := time.Now()
@@ -264,26 +264,27 @@ func handleDownload(conn *net.UDPConn, addr *net.UDPAddr, filename string) {
 
 			window[j] = packet
 			sendPacket(conn, addr, packet, retryChan)
-			fmt.Printf("Sent packet %d\n", packet.SeqNum)
+			fmt.Printf("Sent packet %d\n", packet.SeqNum) // Логирование
 		}
 
 		for j := 0; j < windowSize && i < numChunks; j++ {
 			select {
 			case ack := <-ackChan:
-				fmt.Printf("Received ACK for packet %d\n", ack)
+				fmt.Printf("Received ACK for packet %d\n", ack) // Логирование
 				if ack == uint32(i) {
 					i++
 					sentBytes += len(window[0].Data)
 					window = window[1:]
 					window = append(window, Packet{})
 				}
-			case <-time.After(1 * time.Millisecond):
-				fmt.Printf("Timeout for packet %d, retrying...\n", i)
+			case <-time.After(500 * time.Millisecond): // Увеличенный таймаут
+				fmt.Printf("Timeout for packet %d, retrying...\n", i) // Логирование
 				retryChan <- uint32(i)
 			}
 		}
 	}
 
+	// Отправка маркера завершения
 	_, err = conn.WriteToUDP([]byte("EOF"), addr)
 	if err != nil {
 		fmt.Println("Error sending EOF marker:", err)
