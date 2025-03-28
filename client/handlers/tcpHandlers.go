@@ -12,15 +12,7 @@ import (
 	"time"
 )
 
-func HandleTCPCommands(tcpAddr string, scanner *bufio.Scanner) {
-	conn, err := net.Dial("tcp", tcpAddr)
-	if err != nil {
-		log.Fatal("Error connecting to TCP:", err)
-		return
-	}
-	defer conn.Close()
-	log.Println("TCP connected to", tcpAddr)
-
+func HandleTCPCommands(conn net.Conn, scanner *bufio.Scanner) {
 	reader := bufio.NewReader(conn)
 
 	log.Println("Checking for immediate redirect...")
@@ -110,7 +102,7 @@ func HandleTCPCommands(tcpAddr string, scanner *bufio.Scanner) {
 
 func checkForRedirect(conn net.Conn, reader *bufio.Reader) (net.Conn, error) {
 
-	conn.SetReadDeadline(time.Now().Add(1 * time.Second))
+	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 
 	log.Println("Waiting for potential redirect...")
 	response, err := reader.ReadString('\n')
@@ -209,8 +201,6 @@ func sendTCPCommand(conn net.Conn, reader *bufio.Reader, command string) {
 }
 
 func uploadFileTCP(conn net.Conn, reader *bufio.Reader, filename string) {
-	startTime := time.Now() // Засекаем время начала передачи
-
 	fileInfo, err := os.Stat(filename)
 	if err != nil {
 		fmt.Println("Error accessing file:", err)
@@ -240,12 +230,15 @@ func uploadFileTCP(conn net.Conn, reader *bufio.Reader, filename string) {
 
 	log.Printf("Received response: %q\n", response)
 
+	// Проверяем, не является ли ответ редиректом
 	if strings.HasPrefix(response, "REDIRECT") {
 		newConn, err := handleRedirect(conn, response)
 		if err != nil {
 			fmt.Println("Error handling redirect:", err)
 			return
 		}
+
+		// Повторяем загрузку на новом соединении
 		uploadFileTCP(newConn, bufio.NewReader(newConn), filename)
 		return
 	}
@@ -253,8 +246,6 @@ func uploadFileTCP(conn net.Conn, reader *bufio.Reader, filename string) {
 	fmt.Print(response)
 
 	buffer := make([]byte, 4096)
-	totalSent := 0
-
 	for {
 		n, err := file.Read(buffer)
 		if err != nil {
@@ -265,14 +256,11 @@ func uploadFileTCP(conn net.Conn, reader *bufio.Reader, filename string) {
 			return
 		}
 
-		time.Sleep(time.Nanosecond * 10000 * 15)
 		_, err = conn.Write(buffer[:n])
 		if err != nil {
 			fmt.Println("Error sending file data:", err)
 			return
 		}
-
-		totalSent += n
 	}
 
 	_, err = conn.Write([]byte("EOF\n"))
@@ -287,16 +275,10 @@ func uploadFileTCP(conn net.Conn, reader *bufio.Reader, filename string) {
 		return
 	}
 
-	// Расчет битрейта
-	elapsed := time.Since(startTime).Seconds()
-	bitrate := float64(fileInfo.Size()) / (1024 * 1024 * elapsed) // в МБ/с
-
-	fmt.Printf("%sBitrate: %.2f MB/s\n", response, bitrate)
+	fmt.Print(response)
 }
 
 func downloadFileTCP(conn net.Conn, reader *bufio.Reader, filename string) {
-	startTime := time.Now() // Засекаем время начала скачивания
-
 	command := fmt.Sprintf("DOWNLOAD %s\n", filename)
 	log.Printf("Sending download command: %q\n", command)
 	_, err := conn.Write([]byte(command))
@@ -313,12 +295,15 @@ func downloadFileTCP(conn net.Conn, reader *bufio.Reader, filename string) {
 
 	log.Printf("Received response: %q\n", response)
 
+	// Проверяем, не является ли ответ редиректом
 	if strings.HasPrefix(response, "REDIRECT") {
 		newConn, err := handleRedirect(conn, response)
 		if err != nil {
 			fmt.Println("Error handling redirect:", err)
 			return
 		}
+
+		// Повторяем скачивание на новом соединении
 		downloadFileTCP(newConn, bufio.NewReader(newConn), filename)
 		return
 	}
@@ -339,10 +324,8 @@ func downloadFileTCP(conn net.Conn, reader *bufio.Reader, filename string) {
 
 	fileContent := make([]byte, 4096)
 	eof := false
-	totalReceived := 0
 
 	for !eof {
-		time.Sleep(time.Nanosecond * 10000 * 15)
 		n, err := reader.Read(fileContent)
 		if err != nil {
 			if err == io.EOF {
@@ -355,11 +338,9 @@ func downloadFileTCP(conn net.Conn, reader *bufio.Reader, filename string) {
 		data := fileContent[:n]
 		if n >= 4 && string(data[n-4:n]) == "EOF\n" {
 			_, err = outFile.Write(data[:n-4])
-			totalReceived += n - 4
 			eof = true
 		} else {
 			_, err = outFile.Write(data)
-			totalReceived += n
 		}
 
 		if err != nil {
@@ -368,10 +349,7 @@ func downloadFileTCP(conn net.Conn, reader *bufio.Reader, filename string) {
 		}
 	}
 
-	elapsed := time.Since(startTime).Seconds()
-	bitrate := float64(totalReceived) / (1024 * 1024 * elapsed) // в МБ/с
-
-	fmt.Printf("File '%s' downloaded successfully\nBitrate: %.2f MB/s\n", filename, bitrate)
+	fmt.Printf("File '%s' downloaded successfully\n", filename)
 }
 
 // Функция для обработки редиректа
