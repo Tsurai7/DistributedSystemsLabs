@@ -4,45 +4,49 @@ import (
 	"fmt"
 	"log"
 	"net"
-	"syscall"
-
-	"github.com/smallnest/epoller"
+	"server/handlers"
+	"time"
 )
 
 const (
 	TcpHostPort     = ":8081"
 	UdpHostPort     = ":9091"
 	KeepAlivePeriod = 30
-	BufferSize      = 1024
 )
 
 func main() {
-	// Создаем epoller
-	poller, err := epoller.NewPoller(BufferSize)
-	if err != nil {
-		log.Fatalf("Failed to create poller: %v", err)
-	}
+	tcpConnChan := make(chan net.Conn)
+	errChan := make(chan error, 2)
 
-	go startTcpServer(poller)
-	go startUdpServer(poller)
+	go func() {
+		err := startTcpServer(tcpConnChan)
+		errChan <- err
+	}()
+
+	go func() {
+		err := startUdpServer()
+		errChan <- err
+	}()
 
 	for {
-		conns, err := poller.Wait(128) // Ожидаем события (максимум 128 за раз)
-		if err != nil {
-			log.Printf("Error in poller.Wait: %v", err)
-			continue
-		}
+		select {
+		case conn := <-tcpConnChan:
+			fmt.Printf("New TCP connection from %s\n", conn.RemoteAddr())
+			go handlers.HandleTcpConnections(conn)
 
-		for _, conn := range conns {
-			handleConnection(conn)
+		case err := <-errChan:
+			if err != nil {
+				log.Fatalf("Server error: %v", err)
+			}
+
 		}
 	}
 }
 
-func startTcpServer(poller *epoller.Epoll) {
+func startTcpServer(tcpConnChan chan net.Conn) error {
 	ln, err := net.Listen("tcp", TcpHostPort)
 	if err != nil {
-		log.Fatalf("Failed to listen: %v", err)
+		return fmt.Errorf("Failed to listen: %v", err)
 	}
 	defer ln.Close()
 
@@ -55,86 +59,37 @@ func startTcpServer(poller *epoller.Epoll) {
 			continue
 		}
 
-		if err := setNonBlocking(conn); err != nil {
-			log.Printf("Failed to set non-blocking mode: %v", err)
-			conn.Close()
+		tcpConn := conn.(*net.TCPConn)
+		if err := tcpConn.SetKeepAlive(true); err != nil {
+			log.Printf("Failed to enable Keep-Alive: %v", err)
 			continue
 		}
 
-		if err := (*poller).Add(conn); err != nil {
-			log.Printf("Failed to add connection to poller: %v", err)
-			conn.Close()
+		if err := tcpConn.SetKeepAlivePeriod(KeepAlivePeriod * time.Second); err != nil {
+			log.Printf("Failed to set Keep-Alive period: %v", err)
 			continue
 		}
 
-		fmt.Printf("New TCP connection from %s\n", conn.RemoteAddr())
+		// Отправляем TCP соединение в главный поток для обработки
+		tcpConnChan <- conn
 	}
 }
 
-func startUdpServer(poller *epoller.Epoll) {
+func startUdpServer() error {
 	addr, err := net.ResolveUDPAddr("udp", UdpHostPort)
 	if err != nil {
-		log.Fatalf("Failed to resolve UDP address: %v", err)
+		return fmt.Errorf("Failed to resolve UDP address: %v", err)
 	}
 
 	conn, err := net.ListenUDP("udp", addr)
 	if err != nil {
-		log.Fatalf("Failed to start UDP server: %v", err)
+		return fmt.Errorf("Failed to start UDP server: %v", err)
 	}
 	defer conn.Close()
 
 	fmt.Printf("UDP server listening on %s\n", UdpHostPort)
 
-	// Переводим UDP-сокет в неблокирующий режим
-	if err := setNonBlocking(conn); err != nil {
-		log.Fatalf("Failed to set non-blocking mode for UDP: %v", err)
-	}
-
-	// Добавляем UDP-сокет в epoller
-	if err := (*poller).Add(conn); err != nil {
-		log.Fatalf("Failed to add UDP connection to poller: %v", err)
-	}
-}
-
-func handleConnection(conn net.Conn) {
-	defer conn.Close()
-
-	buffer := make([]byte, BufferSize)
-	n, err := conn.Read(buffer)
-	if err != nil {
-		log.Printf("Error reading from connection: %v", err)
-		return
-	}
-
-	// Обработка данных
-	data := buffer[:n]
-	fmt.Printf("Received data from %s: %s\n", conn.RemoteAddr(), string(data))
-
-	// Отправляем ответ
-	response := fmt.Sprintf("Echo: %s", string(data))
-	_, err = conn.Write([]byte(response))
-	if err != nil {
-		log.Printf("Error writing to connection: %v", err)
-	}
-}
-
-// setNonBlocking переводит сокет в неблокирующий режим
-func setNonBlocking(conn net.Conn) error {
-	fd, err := conn.(syscall.Conn).SyscallConn()
-	if err != nil {
-		return fmt.Errorf("failed to get syscall.Conn: %v", err)
-	}
-
-	var syscallErr error
-	err = fd.Control(func(fd uintptr) {
-		syscallErr = syscall.SetNonblock(int(fd), true)
-	})
-	if err != nil {
-		return fmt.Errorf("failed to control fd: %v", err)
-	}
-	if syscallErr != nil {
-		return fmt.Errorf("failed to set non-blocking mode: %v", syscallErr)
-	}
+	handlers.HandleUdpConnections(conn)
 
 	return nil
 }
