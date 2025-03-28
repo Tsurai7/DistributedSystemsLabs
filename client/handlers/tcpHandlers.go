@@ -12,12 +12,9 @@ import (
 	"time"
 )
 
-// HandleTCPCommands обрабатывает команды по TCP
 func HandleTCPCommands(conn net.Conn, scanner *bufio.Scanner) {
-	// Создаем reader для получения ответов от сервера
 	reader := bufio.NewReader(conn)
 
-	// Проверяем, не получили ли мы редирект сразу при подключении
 	log.Println("Checking for immediate redirect...")
 	redirectedConn, err := checkForRedirect(conn, reader)
 	if err != nil {
@@ -103,16 +100,13 @@ func HandleTCPCommands(conn net.Conn, scanner *bufio.Scanner) {
 	}
 }
 
-// Функция проверяет первый ответ от сервера на наличие редиректа
 func checkForRedirect(conn net.Conn, reader *bufio.Reader) (net.Conn, error) {
-	// Устанавливаем таймаут для чтения
+
 	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 
-	// Пытаемся прочитать ответ от сервера
 	log.Println("Waiting for potential redirect...")
 	response, err := reader.ReadString('\n')
 
-	// Сбрасываем таймаут
 	conn.SetReadDeadline(time.Time{})
 
 	// Если ошибка таймаута или соединение еще ничего не прислало, продолжаем с текущим соединением
