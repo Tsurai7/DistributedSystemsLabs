@@ -14,9 +14,9 @@ import (
 
 const (
 	DatagramSize  = 1500             // Recommended datagram size per ethernet mtu limitations (1500 bytes)
-	SlidingWindow = 3                // We will receive ACK for 3 packages
+	SlidingWindow = 8                // We will receive ACK for 3 packages
 	BuffSize      = 64 * 1024 * 1024 // 64 MBs
-	Timeout       = time.Millisecond * 10
+	Timeout       = time.Millisecond * 100
 )
 
 func ProgressBar(current, total int, operation string) {
@@ -257,7 +257,7 @@ func uploadFileUDP(conn *net.UDPConn, filename string) {
 		}
 
 		ackedCount := countAcked(ackedChunks)
-		ProgressBar(ackedCount*DatagramSize, fileSize, "Uploading")
+		go ProgressBar(ackedCount*DatagramSize, fileSize, "Uploading")
 
 		// Отправляем чанки в окне
 		for i := nextChunk; i < nextChunk+SlidingWindow && i < numChunks; i++ {
@@ -454,7 +454,7 @@ func downloadFileUDP(conn *net.UDPConn, filename string) {
 
 	for totalBytes < fileSize && !eofReceived {
 		if time.Since(lastProgressUpdate) > 100*time.Millisecond {
-			ProgressBar(totalBytes, fileSize, "Downloading")
+			go ProgressBar(totalBytes, fileSize, "Downloading")
 			lastProgressUpdate = time.Now()
 		}
 
@@ -523,7 +523,7 @@ func downloadFileUDP(conn *net.UDPConn, filename string) {
 		return
 	}
 
-	ProgressBar(fileSize, fileSize, "Downloading")
+	go ProgressBar(fileSize, fileSize, "Downloading")
 
 	// Переименовываем временный файл в окончательный
 	if err := os.Rename(tempFilename, filename); err != nil {
