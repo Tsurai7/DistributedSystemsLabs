@@ -14,9 +14,9 @@ import (
 
 const (
 	DatagramSize  = 1500 // Recommended datagram size per ethernet mtu limitations
-	SlidingWindow = 3    // We will receive ACK for 3 packages
+	SlidingWindow = 8    // We will receive ACK for 3 packages
 	BuffSize      = 64 * 1024 * 1024
-	UdpTimeout    = time.Millisecond * 10
+	UdpTimeout    = time.Millisecond * 100
 )
 
 type Packet struct {
@@ -189,7 +189,7 @@ func handleUpload(conn *net.UDPConn, addr *net.UDPAddr, args []string) {
 	for {
 		// Обновляем прогресс
 		if time.Since(lastProgressUpdate) > UdpTimeout {
-			ProgressBar(totalBytes, totalBytes, "Receiving")
+			go ProgressBar(totalBytes, totalBytes, "Receiving")
 			lastProgressUpdate = time.Now()
 		}
 
@@ -254,7 +254,7 @@ func handleUpload(conn *net.UDPConn, addr *net.UDPAddr, args []string) {
 
 	elapsed := time.Since(start).Seconds()
 	speed := float64(totalBytes-offset) / (1024 * 1024 * elapsed)
-	ProgressBar(totalBytes, totalBytes, "Receiving")
+	go ProgressBar(totalBytes, totalBytes, "Receiving")
 	fmt.Printf("\nFile '%s' received successfully (%d bytes in %.2f seconds, %.2f MB/s)\n",
 		filename, totalBytes-offset, elapsed, speed)
 
@@ -349,7 +349,7 @@ func handleDownload(conn *net.UDPConn, addr *net.UDPAddr, args []string) {
 
 	for i < numChunks {
 		if time.Since(lastProgressUpdate) > UdpTimeout {
-			ProgressBar(sentBytes+offset, fileSize, "Sending")
+			go ProgressBar(sentBytes+offset, fileSize, "Sending")
 			lastProgressUpdate = time.Now()
 		}
 
@@ -405,7 +405,7 @@ func handleDownload(conn *net.UDPConn, addr *net.UDPAddr, args []string) {
 
 	elapsed := time.Since(start).Seconds()
 	speed := float64(remainingSize) / (1024 * 1024 * elapsed)
-	ProgressBar(fileSize, fileSize, "Sending")
+	go ProgressBar(fileSize, fileSize, "Sending")
 	fmt.Printf("\nFile '%s' sent successfully in %.2f seconds (%.2f MB/s)\n",
 		filename, elapsed, speed)
 }
