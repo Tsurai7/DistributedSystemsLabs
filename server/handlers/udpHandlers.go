@@ -13,10 +13,10 @@ import (
 )
 
 const (
-	DatagramSize  = 1400 // Recommended datagram size per ethernet mtu limitations
+	DatagramSize  = 1500 // Recommended datagram size per ethernet mtu limitations
 	SlidingWindow = 3    // We will receive ACK for 3 packages
 	BuffSize      = 64 * 1024 * 1024
-	UdpTimeout    = time.Millisecond * 100
+	UdpTimeout    = time.Millisecond * 10
 )
 
 type Packet struct {
@@ -126,7 +126,7 @@ func handleTime(conn *net.UDPConn, addr *net.UDPAddr) {
 }
 
 func handleUpload(conn *net.UDPConn, addr *net.UDPAddr, args []string) {
-	defer conn.Close()
+	defer conn.SetReadDeadline(time.Time{})
 	if len(args) < 1 {
 		sendResponse(conn, addr, "ERROR: Filename required for upload")
 		return
@@ -277,6 +277,7 @@ func handleDownload(conn *net.UDPConn, addr *net.UDPAddr, args []string) {
 		sendResponse(conn, addr, "ERROR: Filename required for download")
 		return
 	}
+	defer conn.SetReadDeadline(time.Time{})
 
 	filename := args[0]
 	offset := 0
