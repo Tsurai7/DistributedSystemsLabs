@@ -106,6 +106,12 @@ func handleUpload(conn *net.UDPConn, addr *net.UDPAddr, filename string) {
 
 	conn.SetReadBuffer(BuffSize)
 
+	// Проверяем, не существует ли файл
+	if _, err := os.Stat(filename); err == nil {
+		sendResponse(conn, addr, fmt.Sprintf("ERROR: File '%s' already exists", filename))
+		return
+	}
+
 	outputFile, err := os.Create(filename)
 	if err != nil {
 		sendResponse(conn, addr, fmt.Sprintf("ERROR: Could not create file: %v", err))
@@ -128,17 +134,14 @@ func handleUpload(conn *net.UDPConn, addr *net.UDPAddr, filename string) {
 	finalizing := false
 	eofReceived := false
 
-	// Увеличиваем таймаут для финальной фазы
 	finalTimeout := UdpTimeout * 5
 
 	for {
-		// Обновляем прогресс каждые 100мс
 		if time.Since(lastProgressUpdate) > 100*time.Millisecond {
 			ProgressBar(totalBytes, totalBytes, "Receiving")
 			lastProgressUpdate = time.Now()
 		}
 
-		// Для финальной фазы используем увеличенный таймаут
 		currentTimeout := UdpTimeout
 		if finalizing {
 			currentTimeout = finalTimeout
@@ -168,20 +171,17 @@ func handleUpload(conn *net.UDPConn, addr *net.UDPAddr, filename string) {
 
 		noDataCount = 0
 
-		// Обработка EOF
 		if n > 0 && string(buffer[:n]) == "EOF" {
 			if !eofReceived {
 				eofReceived = true
 				finalizing = true
 				fmt.Println("\nEOF marker received, finalizing upload...")
-				// Отправляем подтверждение EOF
 				conn.WriteToUDP([]byte("ACKEOF"), addr)
 				continue
 			}
 		}
 
 		if eofReceived {
-			// После получения EOF игнорируем все данные, кроме повторных ACK
 			continue
 		}
 
@@ -202,7 +202,6 @@ func handleUpload(conn *net.UDPConn, addr *net.UDPAddr, filename string) {
 			ackCounter++
 			lastAckTime = time.Now()
 
-			// Отправляем ACK либо сразу для последнего чанка, либо при заполнении окна
 			if ackCounter >= SlidingWindow || chunkIndex == (totalBytes-1)/DatagramSize {
 				ack := fmt.Sprintf("ACK:%d", chunkIndex)
 				if _, err := conn.WriteToUDP([]byte(ack), addr); err != nil {
@@ -213,7 +212,6 @@ func handleUpload(conn *net.UDPConn, addr *net.UDPAddr, filename string) {
 		}
 	}
 
-	// Дополнительная проверка, что все данные записаны
 	if err := bufWriter.Flush(); err != nil {
 		fmt.Println("\nError flushing buffer:", err)
 		sendResponse(conn, addr, fmt.Sprintf("ERROR: Flush failed: %v", err))
@@ -227,7 +225,6 @@ func handleUpload(conn *net.UDPConn, addr *net.UDPAddr, filename string) {
 		filename, totalBytes, elapsed, speed)
 
 	finalResponse := fmt.Sprintf("SUCCESS: File '%s' uploaded (%d bytes)", filename, totalBytes)
-	// Отправляем финальное подтверждение несколько раз для надежности
 	for i := 0; i < 3; i++ {
 		if _, err := conn.WriteToUDP([]byte(finalResponse), addr); err != nil {
 			fmt.Println("\nError sending final response:", err)

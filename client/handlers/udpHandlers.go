@@ -127,13 +127,32 @@ func sendUDPCommand(conn *net.UDPConn, command string) {
 func uploadFileUDP(conn *net.UDPConn, filename string) {
 	start := time.Now()
 
+	// Проверка существования и размера файла перед чтением
+	fileInfo, err := os.Stat(filename)
+	if err != nil {
+		if os.IsNotExist(err) {
+			fmt.Printf("Error: File '%s' does not exist\n", filename)
+		} else {
+			fmt.Printf("Error accessing file '%s': %v\n", filename, err)
+		}
+		return
+	}
+
+	if fileInfo.Size() == 0 {
+		fmt.Printf("Warning: File '%s' is empty\n", filename)
+	}
+
 	fileData, err := os.ReadFile(filename)
 	if err != nil {
-		fmt.Println("Error reading file:", err)
+		fmt.Printf("Error reading file '%s': %v\n", filename, err)
 		return
 	}
 
 	fileSize := len(fileData)
+	if fileSize == 0 {
+		fmt.Printf("Warning: Read 0 bytes from file '%s'\n", filename)
+	}
+
 	fmt.Printf("Starting upload of '%s' (%d bytes)\n", filename, fileSize)
 
 	conn.SetWriteBuffer(BuffSize)
@@ -160,7 +179,6 @@ func uploadFileUDP(conn *net.UDPConn, filename string) {
 	}
 
 	fmt.Println("Server response:", initialResponse)
-
 	conn.SetReadDeadline(time.Time{})
 
 	numChunks := (fileSize + DatagramSize - 1) / DatagramSize
@@ -170,6 +188,16 @@ func uploadFileUDP(conn *net.UDPConn, filename string) {
 
 	fmt.Println("\nUploading file:", filename)
 	fmt.Printf("Total chunks: %d, Window size: %d\n", numChunks, SlidingWindow)
+
+	// Если файл пустой, сразу отправляем EOF
+	if fileSize == 0 {
+		_, err = conn.Write([]byte("EOF"))
+		if err != nil {
+			fmt.Println("\nError sending EOF marker:", err)
+			return
+		}
+		goto FINAL_RESPONSE
+	}
 
 	for nextChunk < numChunks || !allAcked(ackedChunks) {
 		ackedCount := countAcked(ackedChunks)
@@ -232,6 +260,7 @@ func uploadFileUDP(conn *net.UDPConn, filename string) {
 		return
 	}
 
+FINAL_RESPONSE:
 	retries := 5
 	for i := 0; i < retries; i++ {
 		conn.SetReadDeadline(time.Now().Add(Timeout))
@@ -258,6 +287,30 @@ func uploadFileUDP(conn *net.UDPConn, filename string) {
 		filename, elapsed, speed)
 }
 
+// Вспомогательные функции
+func allAcked(acked []bool) bool {
+	for _, v := range acked {
+		if !v {
+			return false
+		}
+	}
+	return true
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func max(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+
 func countAcked(ackedChunks []bool) int {
 	count := 0
 	for _, acked := range ackedChunks {
@@ -266,15 +319,6 @@ func countAcked(ackedChunks []bool) int {
 		}
 	}
 	return count
-}
-
-func allAcked(ackedChunks []bool) bool {
-	for _, acked := range ackedChunks {
-		if !acked {
-			return false
-		}
-	}
-	return true
 }
 
 func downloadFileUDP(conn *net.UDPConn, filename string) {
