@@ -13,10 +13,10 @@ import (
 )
 
 const (
-	DatagramSize  = 1400             // Recommended datagram size per ethernet mtu limitations (1500 bytes)
+	DatagramSize  = 1500             // Recommended datagram size per ethernet mtu limitations (1500 bytes)
 	SlidingWindow = 3                // We will receive ACK for 3 packages
 	BuffSize      = 64 * 1024 * 1024 // 64 MBs
-	Timeout       = time.Millisecond * 100
+	Timeout       = time.Millisecond * 10
 )
 
 func ProgressBar(current, total int, operation string) {
@@ -140,8 +140,7 @@ func sendUDPCommand(conn *net.UDPConn, command string) {
 }
 
 func uploadFileUDP(conn *net.UDPConn, filename string) {
-	// Закрываем соединение при выходе из функции
-	defer conn.Close()
+	defer conn.SetReadDeadline(time.Time{})
 
 	start := time.Now()
 	globalTimeout := 5 * time.Minute // Максимальное время выполнения всей операции
@@ -232,7 +231,6 @@ func uploadFileUDP(conn *net.UDPConn, filename string) {
 	}
 
 	fmt.Println("Server response:", initialResponse)
-	conn.SetReadDeadline(time.Time{}) // Сбрасываем таймаут
 
 	numChunks := (fileSize + DatagramSize - 1) / DatagramSize
 	sentChunks := make([]bool, numChunks)
@@ -385,6 +383,7 @@ func allAcked(ackedChunks []bool) bool {
 }
 
 func downloadFileUDP(conn *net.UDPConn, filename string) {
+	defer conn.SetReadDeadline(time.Time{})
 	start := time.Now()
 	conn.SetReadBuffer(BuffSize)
 

@@ -265,8 +265,8 @@ func uploadFileTCP(conn net.Conn, reader *bufio.Reader, filename string) {
 			return
 		}
 
+		time.Sleep(time.Nanosecond * 10000 * 15)
 		_, err = conn.Write(buffer[:n])
-		time.Sleep(time.Millisecond * 3)
 		if err != nil {
 			fmt.Println("Error sending file data:", err)
 			return
@@ -342,7 +342,7 @@ func downloadFileTCP(conn net.Conn, reader *bufio.Reader, filename string) {
 	totalReceived := 0
 
 	for !eof {
-		time.Sleep(time.Millisecond * 10)
+		time.Sleep(time.Nanosecond * 10000 * 15)
 		n, err := reader.Read(fileContent)
 		if err != nil {
 			if err == io.EOF {
@@ -368,7 +368,6 @@ func downloadFileTCP(conn net.Conn, reader *bufio.Reader, filename string) {
 		}
 	}
 
-	// Расчет битрейта
 	elapsed := time.Since(startTime).Seconds()
 	bitrate := float64(totalReceived) / (1024 * 1024 * elapsed) // в МБ/с
 
