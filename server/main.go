@@ -15,26 +15,35 @@ const (
 )
 
 func main() {
+	tcpConnChan := make(chan net.Conn)
 	errChan := make(chan error, 2)
+
+	go func() {
+		err := startTcpServer(tcpConnChan)
+		errChan <- err
+	}()
 
 	go func() {
 		err := startUdpServer()
 		errChan <- err
 	}()
 
-	go func() {
-		err := startTcpServer()
-		errChan <- err
-	}()
+	for {
+		select {
+		case conn := <-tcpConnChan:
+			fmt.Printf("New TCP connection from %s\n", conn.RemoteAddr())
+			go handlers.HandleTcpConnections(conn)
 
-	for err := range errChan {
-		if err != nil {
-			log.Fatalf("Server error: %v", err)
+		case err := <-errChan:
+			if err != nil {
+				log.Fatalf("Server error: %v", err)
+			}
+
 		}
 	}
 }
 
-func startTcpServer() error {
+func startTcpServer(tcpConnChan chan net.Conn) error {
 	ln, err := net.Listen("tcp", TcpHostPort)
 	if err != nil {
 		return fmt.Errorf("Failed to listen: %v", err)
@@ -61,9 +70,8 @@ func startTcpServer() error {
 			continue
 		}
 
-		fmt.Printf("New TCP connection from %s\n", conn.RemoteAddr())
-
-		go handlers.HandleTcpConnections(conn)
+		// Отправляем TCP соединение в главный поток для обработки
+		tcpConnChan <- conn
 	}
 }
 
