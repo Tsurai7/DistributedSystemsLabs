@@ -23,20 +23,6 @@ func main() {
 	defer tcpConn.Close()
 	log.Println("TCP connected to", tcpAddr)
 
-	udpServerAddr, err := net.ResolveUDPAddr("udp", udpAddr)
-	if err != nil {
-		log.Fatal("Error resolving UDP address:", err)
-		return
-	}
-
-	udpConn, err := net.DialUDP("udp", nil, udpServerAddr)
-	if err != nil {
-		log.Fatal("Error connecting to UDP:", err)
-		return
-	}
-	defer udpConn.Close()
-	log.Println("UDP connected to", udpAddr)
-
 	scanner := bufio.NewScanner(os.Stdin)
 
 	for {
@@ -51,7 +37,7 @@ func main() {
 		case "1":
 			handlers.HandleTCPCommands(tcpConn, scanner)
 		case "2":
-			handlers.HandleUDPCommands(udpConn, scanner)
+			handlers.HandleUDPCommands(udpAddr, scanner)
 		case "3":
 			fmt.Println("Exiting...")
 			return
