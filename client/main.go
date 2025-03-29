@@ -4,8 +4,6 @@ import (
 	"bufio"
 	"client/handlers"
 	"fmt"
-	"log"
-	"net"
 	"os"
 )
 
@@ -15,14 +13,6 @@ const (
 )
 
 func main() {
-	tcpConn, err := net.Dial("tcp", tcpAddr)
-	if err != nil {
-		log.Fatal("Error connecting to TCP:", err)
-		return
-	}
-	defer tcpConn.Close()
-	log.Println("TCP connected to", tcpAddr)
-
 	scanner := bufio.NewScanner(os.Stdin)
 
 	for {
@@ -32,10 +22,9 @@ func main() {
 		}
 
 		choice := scanner.Text()
-
 		switch choice {
 		case "1":
-			handlers.HandleTCPCommands(tcpConn, scanner)
+			handlers.HandleTCPCommands(tcpAddr, scanner)
 		case "2":
 			handlers.HandleUDPCommands(udpAddr, scanner)
 		case "3":
