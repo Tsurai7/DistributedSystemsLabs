@@ -381,25 +381,21 @@ func allAcked(ackedChunks []bool) bool {
 	}
 	return true
 }
-
 func downloadFileUDP(conn *net.UDPConn, filename string) {
 	defer conn.SetReadDeadline(time.Time{})
 	start := time.Now()
 	conn.SetReadBuffer(BuffSize)
 
-	// Проверяем существование частично скачанного файла
 	tempFilename := filename + ".part"
 	fileInfo, err := os.Stat(tempFilename)
 	var existingSize int64 = 0
 	var outputFile *os.File
 
 	if err == nil {
-		// Файл существует, продолжаем докачку
 		existingSize = fileInfo.Size()
 		outputFile, err = os.OpenFile(tempFilename, os.O_APPEND|os.O_WRONLY, 0644)
 		fmt.Printf("\nResuming download from %d bytes\n", existingSize)
 	} else {
-		// Новый файл
 		outputFile, err = os.Create(tempFilename)
 		fmt.Printf("\nStarting new download\n")
 	}
@@ -410,7 +406,6 @@ func downloadFileUDP(conn *net.UDPConn, filename string) {
 	}
 	defer outputFile.Close()
 
-	// Отправляем запрос на скачивание с указанием текущей позиции
 	downloadCmd := fmt.Sprintf("DOWNLOAD %s %d", filename, existingSize)
 	_, err = conn.Write([]byte(downloadCmd))
 	if err != nil {
@@ -418,25 +413,33 @@ func downloadFileUDP(conn *net.UDPConn, filename string) {
 		return
 	}
 
-	// Получаем размер файла от сервера
 	fileSizeBuffer := make([]byte, DatagramSize)
-	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	conn.SetReadDeadline(time.Now().Add(10 * time.Second))
 	n, _, err := conn.ReadFromUDP(fileSizeBuffer)
 	if err != nil {
 		fmt.Println("Error receiving file size:", err)
 		return
 	}
 
-	if string(fileSizeBuffer[:n]) == "FILE_NOT_FOUND" {
+	response := string(fileSizeBuffer[:n])
+	if response == "FILE_NOT_FOUND" {
 		fmt.Println("Error: File not found on server")
 		return
 	}
 
-	fileSize, err := strconv.Atoi(string(fileSizeBuffer[:n]))
+	if !strings.HasPrefix(response, "SIZE ") {
+		fmt.Println("Invalid response from server:", response)
+		return
+	}
+
+	fileSize, err := strconv.Atoi(strings.TrimPrefix(response, "SIZE "))
 	if err != nil {
 		fmt.Println("Error parsing file size:", err)
 		return
 	}
+
+	// Send ACK for file size
+	conn.Write([]byte("ACK"))
 
 	fmt.Printf("\nDownloading file '%s' (%d bytes total, %d bytes remaining)\n",
 		filename, fileSize, fileSize-int(existingSize))
@@ -444,15 +447,16 @@ func downloadFileUDP(conn *net.UDPConn, filename string) {
 	bufWriter := bufio.NewWriterSize(outputFile, BuffSize)
 	defer bufWriter.Flush()
 
-	buffer := make([]byte, DatagramSize+4) // +4 для номера последовательности
+	buffer := make([]byte, DatagramSize+4)
 	totalBytes := int(existingSize)
 	expectedSeqNum := uint32(existingSize / int64(DatagramSize))
 	lastProgressUpdate := time.Now()
-	eofReceived := false
+	//eofReceived := false
+	eofCount := 0
 
 	pendingPackets := make(map[uint32][]byte)
 
-	for totalBytes < fileSize && !eofReceived {
+	for totalBytes < fileSize && eofCount < 3 {
 		if time.Since(lastProgressUpdate) > 100*time.Millisecond {
 			go ProgressBar(totalBytes, fileSize, "Downloading")
 			lastProgressUpdate = time.Now()
@@ -462,7 +466,6 @@ func downloadFileUDP(conn *net.UDPConn, filename string) {
 		n, _, err := conn.ReadFromUDP(buffer)
 		if err != nil {
 			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
-				fmt.Printf("\nTimeout waiting for packet %d, resending ACK...", expectedSeqNum)
 				sendACK(conn, expectedSeqNum-1)
 				continue
 			}
@@ -471,8 +474,7 @@ func downloadFileUDP(conn *net.UDPConn, filename string) {
 		}
 
 		if n >= 3 && string(buffer[:3]) == "EOF" {
-			eofReceived = true
-			fmt.Println("\nEOF marker received")
+			eofCount++
 			continue
 		}
 
@@ -516,16 +518,11 @@ func downloadFileUDP(conn *net.UDPConn, filename string) {
 		}
 	}
 
-	sendACK(conn, expectedSeqNum-1)
-
 	if err := bufWriter.Flush(); err != nil {
 		fmt.Println("\nError flushing buffer:", err)
 		return
 	}
 
-	go ProgressBar(fileSize, fileSize, "Downloading")
-
-	// Переименовываем временный файл в окончательный
 	if err := os.Rename(tempFilename, filename); err != nil {
 		fmt.Println("\nError renaming temporary file:", err)
 		return
